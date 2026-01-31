@@ -1,0 +1,83 @@
+{
+    "ab91f381-7c72-49be-8d9f-e325bb805358": "agent1qwtxjkmuvs7qrtwx8jj3mtd8af5th5ayfmdyws9mzxcfwa666n3vkkdanz6",
+    "bc7ab72b-8b06-45f0-a2d3-8339546349f1": "agent1qwtxjkmuvs7qrtwx8jj3mtd8af5th5ayfmdyws9mzxcfwa666n3vkkdanz6",
+    "780abc09-629d-467c-bce1-5b75cfe7c47b": "agent1qwtxjkmuvs7qrtwx8jj3mtd8af5th5ayfmdyws9mzxcfwa666n3vkkdanz6",
+    "027985e5-9158-4cd9-9e9b-5a7da396854f": "agent1qwtxjkmuvs7qrtwx8jj3mtd8af5th5ayfmdyws9mzxcfwa666n3vkkdanz6",
+    "original_message_027985e5-9158-4cd9-9e9b-5a7da396854f": "@agent1q2943p8ja20slch8hkgnrvwscvuasnxfre0dfhzhlf744lvrpuhqurty7j4 Plan me a day in new york city",
+    "49ba96ca-3767-4465-a9f9-e5cb2856855c": "agent1qwtxjkmuvs7qrtwx8jj3mtd8af5th5ayfmdyws9mzxcfwa666n3vkkdanz6",
+    "original_message_49ba96ca-3767-4465-a9f9-e5cb2856855c": "@agent1q2943p8ja20slch8hkgnrvwscvuasnxfre0dfhzhlf744lvrpuhqurty7j4 Plan me a day in new york city",
+    "c2b6e65d-fca7-4985-91a9-c15105269dc1": "agent1qwtxjkmuvs7qrtwx8jj3mtd8af5th5ayfmdyws9mzxcfwa666n3vkkdanz6",
+    "original_message_c2b6e65d-fca7-4985-91a9-c15105269dc1": "@agent1q2943p8ja20slch8hkgnrvwscvuasnxfre0dfhzhlf744lvrpuhqurty7j4 Plan me a day in new york city",
+    "0c1aaaf3-bf43-4f31-ab29-181bc2efd6cb": "agent1qwtxjkmuvs7qrtwx8jj3mtd8af5th5ayfmdyws9mzxcfwa666n3vkkdanz6",
+    "original_message_0c1aaaf3-bf43-4f31-ab29-181bc2efd6cb": "@agent1q2943p8ja20slch8hkgnrvwscvuasnxfre0dfhzhlf744lvrpuhqurty7j4 Plan me a day in new york city",
+    "ae8336f3-2c58-4acf-82e6-f791624e57b5": "agent1qfsuxw6yaz223jppu974lf2kyuznqeruvy3rnu0pw3m6acmtmxmq7c5yz7k",
+    "original_message_ae8336f3-2c58-4acf-82e6-f791624e57b5": "Plan me a day in new york city",
+    "2071101f-0386-4671-a77a-530c090f350d": "agent1qfsuxw6yaz223jppu974lf2kyuznqeruvy3rnu0pw3m6acmtmxmq7c5yz7k",
+    "original_message_2071101f-0386-4671-a77a-530c090f350d": "Plan me a day in Toronto",
+    "b59698e6-ee6d-40a8-be1d-6493aff3d01d": "agent1qfsuxw6yaz223jppu974lf2kyuznqeruvy3rnu0pw3m6acmtmxmq7c5yz7k",
+    "original_message_b59698e6-ee6d-40a8-be1d-6493aff3d01d": "Eat, sightsee and shop",
+    "conversation_state_agent1qfsuxw6yaz223jppu974lf2kyuznqeruvy3rnu0pw3m6acmtmxmq7c5yz7k": {
+        "waiting_for_clarification": true,
+        "original_request": "Plan a day itinerary in Toronto",
+        "location": "Toronto",
+        "budget": "None",
+        "start_time": "null",
+        "end_time": "null",
+        "categories": [
+            {
+                "category": "eat",
+                "description": "Dining and food experiences",
+                "examples": [
+                    "local cuisine",
+                    "restaurants",
+                    "cafes"
+                ]
+            },
+            {
+                "category": "sightsee",
+                "description": "Sightseeing and landmarks",
+                "examples": [
+                    "monuments",
+                    "museums",
+                    "parks"
+                ]
+            },
+            {
+                "category": "shop",
+                "description": "Shopping and markets",
+                "examples": [
+                    "local markets",
+                    "boutiques",
+                    "souvenirs"
+                ]
+            },
+            {
+                "category": "entertainment",
+                "description": "Entertainment and nightlife",
+                "examples": [
+                    "shows",
+                    "concerts",
+                    "bars"
+                ]
+            },
+            {
+                "category": "outdoor",
+                "description": "Outdoor activities",
+                "examples": [
+                    "parks",
+                    "hiking",
+                    "beaches"
+                ]
+            },
+            {
+                "category": "cultural",
+                "description": "Cultural experiences",
+                "examples": [
+                    "museums",
+                    "galleries",
+                    "historic sites"
+                ]
+            }
+        ]
+    }
+}

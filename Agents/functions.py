@@ -2,6 +2,7 @@ from uagents import Model
 from typing import Optional, List, Dict
 import json
 import os
+import re
 from dotenv import load_dotenv
 from pymongo import MongoClient
 from openai import OpenAI
@@ -96,9 +97,17 @@ VAGUENESS_CHECK_PROMPT = """
 Analyze the following user request and determine if it's too vague to create a specific activity plan.
 
 A request is considered vague if:
-- It only mentions a location without specific activities
+- It only mentions a location without specific activities (e.g., "Plan me a day in New York", "I want to visit Paris")
 - It lacks clear preferences or interests
-- It's too general (e.g., "I want to visit Paris" without details)
+- It's too general and doesn't specify what types of activities the user wants
+- It asks for a "day plan" or "itinerary" without specifying activities
+
+A request is NOT vague if:
+- It mentions specific activities (e.g., "I want to visit the Eiffel Tower and eat at a French restaurant")
+- It includes clear preferences (e.g., "I like museums and art galleries")
+- It specifies activity types (e.g., "I want to go shopping and sightseeing")
+
+IMPORTANT: If the request only mentions a location and asks for a plan/itinerary without specific activities, it IS vague.
 
 Return ONLY valid JSON:
 {
@@ -150,8 +159,9 @@ Return ONLY valid JSON in this format:
 
 {
   "activity_list": [
-    "specific activity 1",
-    "specific activity 2",
+    "eat",
+    "sightsee",
+    "shop",
     ...
   ],
   "constraints": {
@@ -165,7 +175,8 @@ Return ONLY valid JSON in this format:
   "notes": "short explanation"
 }
 
-The activity_list should be specific, actionable activities based on the user's preferences.
+IMPORTANT: The activity_list should contain GENERAL activity categories (like "eat", "sightsee", "shop", "entertainment", "relax", "outdoor", "cultural", etc.) 
+NOT specific activities. Use simple, one-word category names based on the user's preferences.
 {transaction_context}
 """
 
@@ -190,7 +201,7 @@ Available specialist agents:
 Return ONLY valid JSON in this format:
 
 {
-  "activity_list": [ ... ],
+  "activity_list": [ "eat", "sightsee", "shop", ... ],
   "constraints": {
     "budget": number or null,
     "start_time": "ISO 8601 datetime string or null",
@@ -201,6 +212,9 @@ Return ONLY valid JSON in this format:
   "agents_to_call": [ ... ],
   "notes": "short explanation"
 }
+
+IMPORTANT: The activity_list should contain GENERAL activity categories (like "eat", "sightsee", "shop", "entertainment", "relax", "outdoor", "cultural", etc.) 
+NOT specific activities. Use simple, one-word category names.
 
 Do NOT include any extra text outside JSON.
 """
@@ -272,7 +286,7 @@ Consider has_sufficient_data true if you can identify clear patterns (at least 3
             max_tokens=400,
         )
         
-        result = json.loads(response.choices[0].message.content)
+        result = safe_json_parse(response.choices[0].message.content)
         return result
         
     except Exception as e:
@@ -282,6 +296,86 @@ Consider has_sufficient_data true if you can identify clear patterns (at least 3
 # ------------------------------------------------------------
 # Intent Dispatch Functions
 # ------------------------------------------------------------
+
+def safe_json_parse(text: str) -> dict:
+    """Safely parse JSON from AI response, handling markdown code blocks and extra whitespace"""
+    if not text:
+        return {}
+    
+    # Remove markdown code blocks if present
+    text = text.strip()
+    if text.startswith("```"):
+        # Remove opening ```json or ```
+        lines = text.split("\n")
+        if lines[0].startswith("```"):
+            lines = lines[1:]
+        # Remove closing ```
+        if lines and lines[-1].strip() == "```":
+            lines = lines[:-1]
+        text = "\n".join(lines)
+    
+    # Try to find JSON object in the text
+    text = text.strip()
+    
+    # Find the first { and last }
+    start_idx = text.find("{")
+    end_idx = text.rfind("}")
+    
+    if start_idx != -1 and end_idx != -1 and end_idx > start_idx:
+        text = text[start_idx:end_idx + 1]
+    elif start_idx == -1:
+        # No opening brace found - might be a fragment
+        # Check if it's just a partial JSON structure
+        if '"general_categories"' in text:
+            # Try to extract the array
+            array_match = re.search(r'(\[[^\]]*(?:\{[^\}]*\}[^\]]*)*\])', text, re.DOTALL)
+            if array_match:
+                try:
+                    return {"general_categories": json.loads(array_match.group(1))}
+                except:
+                    pass
+            return {"general_categories": []}
+        return {}
+    
+    try:
+        return json.loads(text)
+    except (json.JSONDecodeError, ValueError) as e:
+        # If parsing fails, try to extract just the JSON part
+        # Look for common JSON patterns
+        json_match = re.search(r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}', text, re.DOTALL)
+        if json_match:
+            try:
+                return json.loads(json_match.group())
+            except:
+                pass
+        
+        # Try to fix common issues: incomplete JSON, trailing commas, etc.
+        # If we see a partial JSON structure, try to complete it
+        if '"general_categories"' in text:
+            # Try to find the array or object containing general_categories
+            # More flexible pattern to match nested structures
+            match = re.search(r'"general_categories"\s*:\s*(\[[^\]]*(?:\{[^\}]*\}[^\]]*)*\])', text, re.DOTALL)
+            if match:
+                try:
+                    return {"general_categories": json.loads(match.group(1))}
+                except:
+                    pass
+            # If that fails, return empty structure
+            return {"general_categories": []}
+        
+        if '"is_vague"' in text:
+            # Try to extract is_vague boolean
+            bool_match = re.search(r'"is_vague"\s*:\s*(true|false)', text, re.IGNORECASE)
+            location_match = re.search(r'"location"\s*:\s*"([^"]*)"', text)
+            reason_match = re.search(r'"reason"\s*:\s*"([^"]*)"', text)
+            result = {
+                "is_vague": bool_match.group(1).lower() == "true" if bool_match else False,
+                "location": location_match.group(1) if location_match else None,
+                "reason": reason_match.group(1) if reason_match else "Unable to parse"
+            }
+            return result
+        
+        return {}
 
 def check_vagueness(user_text: str) -> dict:
     """Check if the user request is too vague"""
@@ -294,11 +388,20 @@ def check_vagueness(user_text: str) -> dict:
             ],
             max_tokens=200,
         )
-        result = json.loads(response.choices[0].message.content)
+        result = safe_json_parse(response.choices[0].message.content)
+        # Ensure boolean is properly set
+        if "is_vague" in result:
+            result["is_vague"] = bool(result["is_vague"])
+        print(f"Vagueness check parsed result: {result}")  # Debug logging
         return result
     except Exception as e:
         print(f"Vagueness check error: {e}")
-        return {"is_vague": False, "location": None, "reason": "Error checking"}
+        # Default to vague if we can't check, so we prompt the user
+        # Try to extract location from text as fallback
+        import re
+        location_match = re.search(r'\b(?:in|at|to|visit|visit|going to|trip to)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)', user_text, re.IGNORECASE)
+        location = location_match.group(1) if location_match else None
+        return {"is_vague": True, "location": location, "reason": "Error checking - defaulting to vague"}
 
 def research_location_activities(location: str) -> dict:
     """Research popular activities in a location"""
@@ -311,10 +414,22 @@ def research_location_activities(location: str) -> dict:
             ],
             max_tokens=800,
         )
-        result = json.loads(response.choices[0].message.content)
+        content = response.choices[0].message.content
+        if not content:
+            return {"general_categories": []}
+        result = safe_json_parse(content)
+        # Ensure we always return a dict with general_categories
+        if not isinstance(result, dict) or "general_categories" not in result:
+            return {"general_categories": []}
         return result
     except Exception as e:
-        print(f"Research error: {e}")
+        # Log the actual error and response content for debugging
+        error_msg = str(e)
+        if hasattr(e, '__cause__') and e.__cause__:
+            error_msg = f"{error_msg} (caused by: {e.__cause__})"
+        print(f"Research error: {error_msg}")
+        if 'response' in locals() and hasattr(response, 'choices'):
+            print(f"Response content: {response.choices[0].message.content[:200] if response.choices else 'No response'}")
         return {"general_categories": []}
 
 def create_preference_prompt(categories: list) -> str:
@@ -352,7 +467,7 @@ def finalize_activity_list(original_request: str, user_preferences: str, locatio
             ],
             max_tokens=800,
         )
-        result = json.loads(response.choices[0].message.content)
+        result = safe_json_parse(response.choices[0].message.content)
         return result
     except Exception as e:
         print(f"Finalization error: {e}")
@@ -361,14 +476,34 @@ def finalize_activity_list(original_request: str, user_preferences: str, locatio
 def dispatch_intent(user_request: str, sender: str, conversation_state: Optional[Dict] = None) -> Dict:
     """
     Main intent dispatch function that processes user requests.
+    
+    PROMPTING FLOW WHEN REQUEST IS VAGUE OR INSUFFICIENT DATA:
+    1. User sends vague request (e.g., "Plan me a day in New York City")
+    2. check_vagueness() determines if request is vague and extracts location
+    3. If vague:
+       a. Extract basic info (budget, start_time, end_time) from request
+       b. Check user's transaction history for preferences
+       c. If sufficient transaction data (3+ similar activities):
+          - Use inferred preferences to create activity list directly
+          - Return dispatch plan with general categories (eat, sightsee, etc.)
+       d. If insufficient transaction data:
+          - research_location_activities() gets popular categories for location
+          - create_preference_prompt() generates user-friendly prompt
+          - Return clarification_needed with prompt asking user to select categories
+    4. User responds with selected categories (e.g., "1, 3, 5" or "eat, sightsee")
+    5. finalize_activity_list() creates activity list with general categories based on selections
+    6. Return dispatch plan with general activity categories
+    
     Returns a dictionary with either:
-    - A dispatch plan (if complete)
-    - A clarification prompt (if more info needed)
+    - A dispatch plan (if complete) - contains general activity categories like ["eat", "sightsee", "shop"]
+    - A clarification prompt (if more info needed) - asks user to select from categories
     - An error message
     """
     try:
-        # Check if we're waiting for user clarification
+        # STEP 1: Check if we're waiting for user clarification from a previous vague request
         if conversation_state and conversation_state.get("waiting_for_clarification"):
+            # STEP 2: User has responded with their preference selections
+            # Parse their response (could be "1, 3, 5" or "eat, sightsee" or category names)
             user_preferences = user_request
             original_request = conversation_state.get("original_request", "")
             location = conversation_state.get("location", "")
@@ -380,6 +515,7 @@ def dispatch_intent(user_request: str, sender: str, conversation_state: Optional
             if conversation_state.get("transaction_data"):
                 transaction_data = conversation_state.get("transaction_data")
             
+            # STEP 3: Create final activity list with GENERAL categories (eat, sightsee, etc.)
             dispatch_plan = finalize_activity_list(
                 original_request, user_preferences, location, budget, start_time, end_time, transaction_data
             )
@@ -389,51 +525,85 @@ def dispatch_intent(user_request: str, sender: str, conversation_state: Optional
             else:
                 return {"type": "error", "data": {"error": "Failed to finalize activity list"}}
         
-        # New request - check if vague
+        # STEP 1: New request - check if vague
         vagueness_result = check_vagueness(user_request)
+        print(f"Vagueness check result: {vagueness_result}")  # Debug logging
         
-        if vagueness_result.get("is_vague") and vagueness_result.get("location"):
-            location = vagueness_result["location"]
+        # Check if request is vague
+        is_vague = vagueness_result.get("is_vague", False)
+        location = vagueness_result.get("location")
+        
+        # Also check if this looks like a general planning request (contains words like "plan", "itinerary", "day in")
+        is_planning_request = any(word in user_request.lower() for word in ["plan", "itinerary", "day in", "visit", "trip to"])
+        
+        # Treat as vague if: explicitly marked vague OR (has location AND looks like general planning request)
+        if is_vague or (location and is_planning_request):
+            # REQUEST IS VAGUE - Need to gather more information
+            # If location wasn't extracted, try to extract it from text
+            if not location:
+                import re
+                # Try to find location patterns like "in New York", "visit Paris", "trip to Tokyo"
+                location_match = re.search(r'\b(?:in|at|to|visit|trip to|going to)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)', user_request, re.IGNORECASE)
+                if location_match:
+                    location = location_match.group(1)
+                    print(f"Extracted location from text: {location}")
             
-            # Extract basic info
-            try:
-                initial_parse = client.chat.completions.create(
-                    model="asi1-mini",
-                    messages=[
-                        {"role": "system", "content": "Extract budget, start_time, and end_time from: " + user_request + "\nReturn JSON: {\"budget\": number or null, \"start_time\": \"ISO 8601 datetime string or null\", \"end_time\": \"ISO 8601 datetime string or null\"}"},
-                        {"role": "user", "content": user_request},
-                    ],
-                    max_tokens=150,
-                )
-                basic_info = json.loads(initial_parse.choices[0].message.content)
-            except:
-                basic_info = {"budget": None, "start_time": None, "end_time": None}
-            
-            # Check user transactions
-            user_transactions = get_user_transactions(sender)
-            transaction_analysis = analyze_transaction_preferences(user_transactions, location)
-            
-            # If we have sufficient transaction data, use it to create activity list
-            if transaction_analysis and transaction_analysis.get("has_sufficient_data"):
-                inferred_preferences = ", ".join(transaction_analysis.get("inferred_preferences", []))
+            # If still no location, we can't proceed with vague request handling
+            if not location:
+                print("Warning: Vague request but no location found, proceeding with normal dispatch")
+                # Fall through to normal dispatch below
+            else:
+                # STEP 2a: Extract basic info (budget, times) from the vague request
+                try:
+                    initial_parse = client.chat.completions.create(
+                        model="asi1-mini",
+                        messages=[
+                            {"role": "system", "content": "Extract budget, start_time, and end_time from: " + user_request + "\nReturn JSON: {\"budget\": number or null, \"start_time\": \"ISO 8601 datetime string or null\", \"end_time\": \"ISO 8601 datetime string or null\"}"},
+                            {"role": "user", "content": user_request},
+                        ],
+                        max_tokens=150,
+                    )
+                    basic_info = safe_json_parse(initial_parse.choices[0].message.content)
+                except:
+                    basic_info = {"budget": None, "start_time": None, "end_time": None}
                 
-                dispatch_plan = finalize_activity_list(
-                    original_request=user_request,
-                    user_preferences=inferred_preferences,
-                    location=location,
-                    budget=str(basic_info.get("budget", "null")),
-                    start_time=basic_info.get("start_time", "null") or "null",
-                    end_time=basic_info.get("end_time", "null") or "null",
-                    transaction_data=transaction_analysis
-                )
+                # STEP 2b: Check user's transaction history to infer preferences
+                user_transactions = get_user_transactions(sender)
+                transaction_analysis = analyze_transaction_preferences(user_transactions, location)
                 
-                if dispatch_plan:
-                    return {"type": "dispatch_plan", "data": dispatch_plan}
-                else:
-                    # Fallback to prompting
-                    research_result = research_location_activities(location)
-                    categories = research_result.get("general_categories", [])
-                    if categories:
+                # STEP 2c: If we have sufficient transaction data (3+ similar activities), use it directly
+                if transaction_analysis and transaction_analysis.get("has_sufficient_data"):
+                    # SUFFICIENT TRANSACTION DATA: Create activity list directly using inferred preferences
+                    inferred_preferences = ", ".join(transaction_analysis.get("inferred_preferences", []))
+                    
+                    dispatch_plan = finalize_activity_list(
+                        original_request=user_request,
+                        user_preferences=inferred_preferences,
+                        location=location,
+                        budget=str(basic_info.get("budget", "null")),
+                        start_time=basic_info.get("start_time", "null") or "null",
+                        end_time=basic_info.get("end_time", "null") or "null",
+                        transaction_data=transaction_analysis
+                    )
+                    
+                    if dispatch_plan:
+                        # Return dispatch plan with GENERAL categories (eat, sightsee, etc.)
+                        return {"type": "dispatch_plan", "data": dispatch_plan}
+                    else:
+                        # Fallback: If finalization fails, prompt user for preferences
+                        research_result = research_location_activities(location)
+                        categories = research_result.get("general_categories", [])
+                        if not categories:
+                            # If research failed, use default categories
+                            print(f"Research failed for {location}, using default categories")
+                            categories = [
+                                {"category": "eat", "description": "Dining and food experiences", "examples": ["local cuisine", "restaurants", "cafes"]},
+                                {"category": "sightsee", "description": "Sightseeing and landmarks", "examples": ["monuments", "museums", "parks"]},
+                                {"category": "shop", "description": "Shopping and markets", "examples": ["local markets", "boutiques", "souvenirs"]},
+                                {"category": "entertainment", "description": "Entertainment and nightlife", "examples": ["shows", "concerts", "bars"]},
+                                {"category": "outdoor", "description": "Outdoor activities", "examples": ["parks", "hiking", "beaches"]},
+                                {"category": "cultural", "description": "Cultural experiences", "examples": ["museums", "galleries", "historic sites"]}
+                            ]
                         return {
                             "type": "clarification_needed",
                             "data": {
@@ -449,42 +619,63 @@ def dispatch_intent(user_request: str, sender: str, conversation_state: Optional
                                 }
                             }
                         }
-            else:
-                # Not enough transaction data - research and prompt user
-                research_result = research_location_activities(location)
-                categories = research_result.get("general_categories", [])
-                
-                if categories:
-                    return {
-                        "type": "clarification_needed",
-                        "data": {
-                            "prompt": create_preference_prompt(categories),
-                            "conversation_state": {
-                                "waiting_for_clarification": True,
-                                "original_request": user_request,
-                                "location": location,
-                                "budget": str(basic_info.get("budget", "null")),
-                                "start_time": basic_info.get("start_time", "null") or "null",
-                                "end_time": basic_info.get("end_time", "null") or "null",
-                                "categories": categories
+                else:
+                    # INSUFFICIENT TRANSACTION DATA: Research location and prompt user for preferences
+                    # STEP 2d: Research popular activity categories for the location
+                    research_result = research_location_activities(location)
+                    categories = research_result.get("general_categories", [])
+                    
+                    if categories:
+                        # STEP 2e: Generate user-friendly prompt asking them to select categories
+                        # Returns clarification_needed which will prompt user to select from:
+                        # 1. EAT: Dining and food experiences
+                        # 2. SHOP: Shopping and markets
+                        # 3. SIGHTSEE: Sightseeing and landmarks
+                        # etc.
+                        return {
+                            "type": "clarification_needed",
+                            "data": {
+                                "prompt": create_preference_prompt(categories),
+                                "conversation_state": {
+                                    "waiting_for_clarification": True,
+                                    "original_request": user_request,
+                                    "location": location,
+                                    "budget": str(basic_info.get("budget", "null")),
+                                    "start_time": basic_info.get("start_time", "null") or "null",
+                                    "end_time": basic_info.get("end_time", "null") or "null",
+                                    "categories": categories
+                                }
                             }
                         }
-                    }
-                else:
-                    # Research failed, proceed with normal dispatch
-                    response = client.chat.completions.create(
-                        model="asi1-mini",
-                        messages=[
-                            {"role": "system", "content": DISPATCHER_SYSTEM_PROMPT},
-                            {"role": "user", "content": user_request},
-                        ],
-                        max_tokens=600,
-                    )
-                    raw_json = response.choices[0].message.content
-                    dispatch_plan = json.loads(raw_json)
-                    return {"type": "dispatch_plan", "data": dispatch_plan}
+                    else:
+                        # Research failed - use default categories and still prompt user
+                        print(f"Research failed for {location}, using default categories")
+                        default_categories = [
+                            {"category": "eat", "description": "Dining and food experiences", "examples": ["local cuisine", "restaurants", "cafes"]},
+                            {"category": "sightsee", "description": "Sightseeing and landmarks", "examples": ["monuments", "museums", "parks"]},
+                            {"category": "shop", "description": "Shopping and markets", "examples": ["local markets", "boutiques", "souvenirs"]},
+                            {"category": "entertainment", "description": "Entertainment and nightlife", "examples": ["shows", "concerts", "bars"]},
+                            {"category": "outdoor", "description": "Outdoor activities", "examples": ["parks", "hiking", "beaches"]},
+                            {"category": "cultural", "description": "Cultural experiences", "examples": ["museums", "galleries", "historic sites"]}
+                        ]
+                        return {
+                            "type": "clarification_needed",
+                            "data": {
+                                "prompt": create_preference_prompt(default_categories),
+                                "conversation_state": {
+                                    "waiting_for_clarification": True,
+                                    "original_request": user_request,
+                                    "location": location,
+                                    "budget": str(basic_info.get("budget", "null")),
+                                    "start_time": basic_info.get("start_time", "null") or "null",
+                                    "end_time": basic_info.get("end_time", "null") or "null",
+                                    "categories": default_categories
+                                }
+                            }
+                        }
         else:
-            # Request is specific enough - proceed with normal dispatch
+            # REQUEST IS NOT VAGUE: User provided enough detail, proceed with normal dispatch
+            # This creates activity list with GENERAL categories (eat, sightsee, etc.) directly
             response = client.chat.completions.create(
                 model="asi1-mini",
                 messages=[
@@ -494,7 +685,8 @@ def dispatch_intent(user_request: str, sender: str, conversation_state: Optional
                 max_tokens=600,
             )
             raw_json = response.choices[0].message.content
-            dispatch_plan = json.loads(raw_json)
+            dispatch_plan = safe_json_parse(raw_json)
+            # Return dispatch plan with GENERAL categories (eat, sightsee, shop, etc.)
             return {"type": "dispatch_plan", "data": dispatch_plan}
             
     except Exception as e:

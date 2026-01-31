@@ -12,7 +12,7 @@ from uagents_core.contrib.protocols.chat import (
     EndSessionContent,
 )
 from functions import dispatch_intent, IntentRequest
-from datetime import datetime
+from datetime import datetime, timezone
 from uuid import uuid4
 from typing import Any, Dict
 from uagents import Model
@@ -52,7 +52,7 @@ def create_text_chat(text: str, end_session: bool = False) -> ChatMessage:
     if end_session:
         content.append(EndSessionContent(type="end-session"))
     return ChatMessage(
-        timestamp=datetime.utcnow(),
+        timestamp=datetime.now(timezone.utc),
         msg_id=uuid4(),
         content=content,
     )
@@ -62,10 +62,14 @@ async def handle_message(ctx: Context, sender: str, msg: ChatMessage):
     ctx.logger.info(f"Got a message from {sender}: {msg.content}")
     ctx.storage.set(str(ctx.session), sender)
     
-    await ctx.send(
-        sender,
-        ChatAcknowledgement(timestamp=datetime.utcnow(), acknowledged_msg_id=msg.msg_id),
-    )
+    try:
+        await ctx.send(
+            sender,
+            ChatAcknowledgement(timestamp=datetime.now(timezone.utc), acknowledged_msg_id=msg.msg_id),
+        )
+    except Exception as e:
+        ctx.logger.error(f"Error sending acknowledgement to {sender}: {e}")
+        # Don't fail the entire message handling if acknowledgement fails
     
     for item in msg.content:
         if isinstance(item, StartSessionContent):
@@ -75,14 +79,29 @@ async def handle_message(ctx: Context, sender: str, msg: ChatMessage):
             ctx.logger.info(f"Got a message from {sender}: {item.text}")
             ctx.storage.set(str(ctx.session), sender)
             
+            # Store the original message text for fallback if structured output fails
+            original_message_key = f"original_message_{ctx.session}"
+            ctx.storage.set(original_message_key, item.text)
+            
             # Use structured output to extract intent parameters
-            await ctx.send(
-                AI_AGENT_ADDRESS,
-                StructuredOutputPrompt(
-                    prompt=item.text, 
-                    output_schema=IntentRequest.schema()
-                ),
-            )
+            try:
+                await ctx.send(
+                    AI_AGENT_ADDRESS,
+                    StructuredOutputPrompt(
+                        prompt=item.text, 
+                        output_schema=IntentRequest.schema()
+                    ),
+                )
+            except Exception as e:
+                ctx.logger.error(f"Error sending structured output request to AI agent: {e}")
+                # Send error message back to user
+                try:
+                    await ctx.send(
+                        sender,
+                        create_text_chat("Sorry, I encountered an error processing your request. Please try again.")
+                    )
+                except Exception as send_err:
+                    ctx.logger.error(f"Error sending error message to {sender}: {send_err}")
         else:
             ctx.logger.info(f"Got unexpected content from {sender}")
 
@@ -105,22 +124,47 @@ async def handle_structured_output_response(
         return
     
     if "<UNKNOWN>" in str(msg.output):
-        await ctx.send(
-            session_sender,
-            create_text_chat(
-                "Sorry, I couldn't process your request. Please try again later."
-            ),
-        )
+        try:
+            await ctx.send(
+                session_sender,
+                create_text_chat(
+                    "Sorry, I couldn't process your request. Please try again later."
+                ),
+            )
+        except Exception as e:
+            ctx.logger.error(f"Unable to resolve destination endpoint for agent: {session_sender}. Error: {e}")
         return
     
     # Extract intent parameters from structured output
     try:
         intent_data = msg.output if isinstance(msg.output, dict) else {}
-        user_request = intent_data.get("user_request", "")
         
-        if not user_request:
-            # Fallback: try to reconstruct from other fields or use raw output
-            user_request = str(msg.output)
+        # Check if we got the schema structure with data in 'properties'
+        # Some structured output returns: {'type': 'object', 'properties': {'user_request': '...', ...}}
+        if intent_data.get("type") == "object" and "properties" in intent_data:
+            properties = intent_data.get("properties", {})
+            # Check if properties contains actual data (not schema definitions)
+            if isinstance(properties, dict) and "user_request" in properties:
+                # Data is nested in properties - extract it
+                user_request = properties.get("user_request", "")
+                ctx.logger.info(f'Extracted data from properties field: {user_request}')
+            else:
+                # It's actually a schema definition, use original message
+                original_message_key = f"original_message_{ctx.session}"
+                user_request = ctx.storage.get(original_message_key)
+                if not user_request:
+                    user_request = "Unable to extract request"
+                ctx.logger.warning(f'Received schema instead of data, using original message: {user_request}')
+        else:
+            # We got actual extracted data directly
+            user_request = intent_data.get("user_request", "")
+            
+            if not user_request:
+                # Fallback: get original message from storage
+                original_message_key = f"original_message_{ctx.session}"
+                user_request = ctx.storage.get(original_message_key)
+                if not user_request:
+                    user_request = str(msg.output)
             
         ctx.logger.info(f'Processing intent request: {user_request}')
         
@@ -133,29 +177,41 @@ async def handle_structured_output_response(
         
         if result["type"] == "error":
             error_msg = json.dumps(result["data"], indent=2)
-            await ctx.send(session_sender, create_text_chat(error_msg))
+            try:
+                await ctx.send(session_sender, create_text_chat(error_msg))
+            except Exception as e:
+                ctx.logger.error(f"Unable to resolve destination endpoint for agent: {session_sender}. Error: {e}")
         elif result["type"] == "clarification_needed":
             # Store conversation state for next message
             ctx.storage.set(conversation_state_key, result["data"]["conversation_state"])
-            await ctx.send(session_sender, create_text_chat(result["data"]["prompt"], end_session=False))
+            try:
+                await ctx.send(session_sender, create_text_chat(result["data"]["prompt"], end_session=False))
+            except Exception as e:
+                ctx.logger.error(f"Unable to resolve destination endpoint for agent: {session_sender}. Error: {e}")
         elif result["type"] == "dispatch_plan":
             # Clear conversation state if it exists
             if conversation_state:
                 ctx.storage.delete(conversation_state_key)
             
             dispatch_plan_json = json.dumps(result["data"], indent=2)
-            await ctx.send(session_sender, create_text_chat(dispatch_plan_json, end_session=True))
+            try:
+                await ctx.send(session_sender, create_text_chat(dispatch_plan_json, end_session=True))
+            except Exception as e:
+                ctx.logger.error(f"Unable to resolve destination endpoint for agent: {session_sender}. Error: {e}")
             
     except Exception as err:
         ctx.logger.error(f"Error processing structured output: {err}")
         import traceback
         ctx.logger.error(traceback.format_exc())
-        await ctx.send(
-            session_sender,
-            create_text_chat(
-                "Sorry, I couldn't process your request. Please try again later."
-            ),
-        )
+        try:
+            await ctx.send(
+                session_sender,
+                create_text_chat(
+                    "Sorry, I couldn't process your request. Please try again later."
+                ),
+            )
+        except Exception as e:
+            ctx.logger.error(f"Unable to resolve destination endpoint for agent: {session_sender}. Error: {e}")
 
 agent.include(chat_proto, publish_manifest=True)
 agent.include(struct_output_client_proto, publish_manifest=True)
