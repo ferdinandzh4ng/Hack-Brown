@@ -75,6 +75,9 @@ For each activity, provide:
 5. Duration (e.g., "2 hours", "half day", "full day")
 6. Best time to do it (morning/afternoon/evening/flexible)
 7. Difficulty level (easy/moderate/challenging)
+8. Address (if known)
+9. Phone number (if known)
+10. Website URL (if known)
 
 Return ONLY valid JSON in this format:
 {{
@@ -86,7 +89,10 @@ Return ONLY valid JSON in this format:
       "estimated_cost": 45.00,
       "duration": "2 hours",
       "best_time": "morning",
-      "difficulty": "moderate"
+      "difficulty": "moderate",
+      "address": "123 Main St, City, State",
+      "phone": "+1-555-123-4567",
+      "url": "https://example.com"
     }}
   ],
   "total_budget_analysis": {{
@@ -103,6 +109,7 @@ Return ONLY valid JSON in this format:
 
 IMPORTANT: Generate exactly 4-5 activities/events/venues for EACH interest category provided by the user.
 Mix price ranges and difficulty levels across each category. Ensure variety within each interest type.
+Include realistic addresses and contact information where possible.
 """
 
 BUDGET_ANALYSIS_PROMPT = """
@@ -351,42 +358,65 @@ def parse_text_to_json(text: str) -> Dict:
     """
     Try to parse text as JSON, or convert plain text to JSON format
     Also removes @agent mentions
+    Validates required parameters strictly
     """
-    # Remove @agent mentions
     import re
+    
+    # Remove @agent mentions
     cleaned_text = re.sub(r'@agent[a-zA-Z0-9]+', '', text).strip()
     
     # Try to parse as JSON first
     try:
-        return json.loads(cleaned_text)
+        data = json.loads(cleaned_text)
+        # Validate required fields
+        if not data.get("location"):
+            raise ValueError("Missing required field: location")
+        if not data.get("interest_activities"):
+            raise ValueError("Missing required field: interest_activities (must be non-empty list)")
+        if not isinstance(data.get("interest_activities"), list) or len(data.get("interest_activities")) == 0:
+            raise ValueError("interest_activities must be a non-empty list")
+        # Budget should be positive if provided
+        if "budget" in data and data["budget"] is not None and data["budget"] <= 0:
+            raise ValueError("Budget must be greater than 0")
+        return data
     except json.JSONDecodeError:
         pass
+    except ValueError as ve:
+        raise ve
     
-    # If not JSON, use AI to parse natural language into JSON
+    # If not valid JSON, use AI to parse natural language into JSON with strict validation
     try:
         response = client.chat.completions.create(
             model="asi1-mini",
             messages=[
-                {"role": "system", "content": """You are a JSON converter. Convert the user's natural language request into a JSON object with these fields:
-- location: (string, required - city name)
+                {"role": "system", "content": """You are a strict JSON converter. Convert the user's natural language request into a JSON object with these REQUIRED fields:
+- location: (string, REQUIRED - city name only, must be a real place)
+- interest_activities: (array of strings, REQUIRED - must have at least 1 activity like skiing, hiking, dining, sightseeing, adventure)
+- budget: (number, optional - in USD, must be > 0 if provided)
 - timeframe: (string, optional - e.g., "weekend", "3 days")
-- budget: (number, optional - in USD)
-- interest_activities: (array of strings, optional - activity types like ["skiing", "hiking"])
 
-If any field is missing, use reasonable defaults. Return ONLY valid JSON."""},
+STRICT RULES:
+1. Location MUST be provided and must be a valid city/place name
+2. interest_activities MUST be a non-empty array
+3. Budget MUST be positive if provided
+4. Return ONLY valid JSON with no other text"""},
                 {"role": "user", "content": cleaned_text},
             ],
             max_tokens=300,
         )
-        return json.loads(response.choices[0].message.content)
-    except Exception as e:
-        # Fallback: return a basic structure
-        return {
-            "location": "Unknown",
-            "timeframe": "weekend",
-            "budget": 500,
-            "interest_activities": ["sightseeing"]
-        }
+        data = json.loads(response.choices[0].message.content)
+        
+        # Validate the parsed data
+        if not data.get("location"):
+            raise ValueError("Location not provided or invalid")
+        if not data.get("interest_activities") or not isinstance(data.get("interest_activities"), list) or len(data["interest_activities"]) == 0:
+            raise ValueError("At least one activity interest is required")
+        if "budget" in data and data["budget"] is not None and data["budget"] <= 0:
+            raise ValueError("Budget must be greater than 0")
+            
+        return data
+    except (json.JSONDecodeError, ValueError) as e:
+        raise ValueError(f"Failed to parse request. Required fields: location, interest_activities. Error: {str(e)}")
 
 # ============================================================
 # Message Handlers
