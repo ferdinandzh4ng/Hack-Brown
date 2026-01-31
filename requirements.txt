@@ -1,0 +1,8 @@
+openai
+uagents
+uagents-core
+python-dotenv
+pymongo
+fastapi
+uvicorn
+
