@@ -1,0 +1,45 @@
+{
+  "user": {
+    "id": "user-vic-demo",
+    "name": "Alex",
+    "initials": "AE",
+    "preferences": {
+      "interests": ["Photography", "Local Coffee", "Sustainable Living", "Hackathons"],
+      "community_focus": true,
+      "prefer_digital": true
+    }
+  },
+  "recent_activity": [
+    {
+      "id": "tx-1",
+      "merchant": "Greyhouse Coffee Supply",
+      "amount": 6.75,
+      "date": "2025-01-30",
+      "method": "contactless",
+      "category": "Food & Drink"
+    },
+    {
+      "id": "tx-2",
+      "merchant": "Downtown Farmers Market",
+      "amount": 12.50,
+      "date": "2025-01-28",
+      "method": "contactless",
+      "category": "Community"
+    },
+    {
+      "id": "tx-3",
+      "merchant": "Greyhouse Coffee Supply",
+      "amount": 5.25,
+      "date": "2025-01-25",
+      "method": "contactless",
+      "category": "Food & Drink"
+    }
+  ],
+  "agent_reasoning_inputs": {
+    "frequent_merchants": ["Greyhouse Coffee Supply", "Downtown Farmers Market"],
+    "visit_count_greyhouse_this_month": 3,
+    "interest_match_keywords": ["local", "sustainable", "coffee", "community"],
+    "community_spend_this_month": 24.50,
+    "suggested_next": "Revisit farmers market or try a new campus vendor; both are digital-first and align with your interests."
+  }
+}

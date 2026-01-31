@@ -1,0 +1,62 @@
+{
+  "community": {
+    "name": "West Lafayette",
+    "region": "Indiana",
+    "digital_adoption": 87,
+    "local_merchant_count": 142,
+    "last_updated": "2025-01-31"
+  },
+  "insights": [
+    {
+      "id": "ci-1",
+      "type": "trend",
+      "title": "Farmers markets go fully contactless",
+      "summary": "3 of 4 weekend markets in your area now prefer digital payment. Cash lines are 2–4 min longer.",
+      "impact": "Faster checkout, fewer touchpoints.",
+      "source": "Visa Community Insights"
+    },
+    {
+      "id": "ci-2",
+      "type": "safety",
+      "title": "Contactless usage up 40% in local cafes",
+      "summary": "Merchants you visit often have upgraded to tap-to-pay. No need to carry cash for small purchases.",
+      "impact": "Secure, no card handoff.",
+      "source": "Visa Network Data"
+    },
+    {
+      "id": "ci-3",
+      "type": "value",
+      "title": "Local rewards stack with Visa offers",
+      "summary": "12 merchants in your community participate in Visa Local Offers. Earn back on every tap.",
+      "impact": "More value than cash at same stores.",
+      "source": "Visa Intelligent Commerce"
+    }
+  ],
+  "merchant_highlights": [
+    {
+      "id": "m1",
+      "name": "Downtown Farmers Market",
+      "category": "Community Event",
+      "digital_ready": true,
+      "avg_wait_cash_min": 4,
+      "avg_wait_digital_min": 1,
+      "visa_users_nearby": 124
+    },
+    {
+      "id": "m2",
+      "name": "Greyhouse Coffee Supply",
+      "category": "Local Merchant",
+      "digital_ready": true,
+      "rewards_available": true,
+      "visa_users_nearby": 89
+    },
+    {
+      "id": "m3",
+      "name": "Purdue University Union Vendors",
+      "category": "Campus",
+      "digital_ready": true,
+      "cashless_preferred": true,
+      "visa_users_nearby": 312
+    }
+  ]
+}

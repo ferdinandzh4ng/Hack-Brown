@@ -1,0 +1,58 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --visa-blue: #003399;
+  --visa-gold: #F7B600;
+  --visa-blue-dark: #002266;
+  --slate-bg: #f8fafc;
+  --slate-border: #e2e8f0;
+  --slate-muted: #64748b;
+  --slate-ink: #0f172a;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  -webkit-tap-highlight-color: transparent;
+}
+
+body {
+  @apply antialiased text-slate-trust-900 bg-slate-trust-50;
+  font-feature-settings: 'cv02', 'cv03', 'cv04', 'cv11';
+}
+
+/* Safe area for notched devices */
+@supports (padding: env(safe-area-inset-bottom)) {
+  .pb-safe {
+    padding-bottom: calc(1.25rem + env(safe-area-inset-bottom));
+  }
+}
+.safe-area-padding {
+  padding-left: env(safe-area-inset-left, 0);
+  padding-right: env(safe-area-inset-right, 0);
+}
+
+/* Agentic accent – subtle gold left border for reasoning blocks */
+.agent-reasoning {
+  border-left: 3px solid var(--visa-gold);
+  background: linear-gradient(90deg, rgba(247, 182, 0, 0.06) 0%, transparent 100%);
+}
+
+/* Premium card hover (touch-friendly) */
+@media (hover: none) {
+  .card-touch:active {
+    transform: scale(0.99);
+  }
+}
+
+.scrollbar-hide {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+.scrollbar-hide::-webkit-scrollbar {
+  display: none;
+}

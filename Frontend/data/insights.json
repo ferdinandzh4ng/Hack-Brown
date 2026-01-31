@@ -1,0 +1,40 @@
+{
+  "recommendations": [
+    {
+      "id": "rec-1",
+      "title": "Downtown Farmers Market",
+      "subtitle": "Community Event · 15+ local farmers",
+      "type": "Community Event",
+      "impact": "Supports 15+ Local Farmers",
+      "cost": "$12.50",
+      "score": 94,
+      "agent_reasoning": "Matches your interest in Sustainable Living. 124 Visa users in West Lafayette verified. Community Insights: farmers markets here prefer digital—saves ~4 min vs cash.",
+      "cash_vs_digital": "Saves ~4 min vs cash checkout",
+      "badges": ["COMMUNITY", "TRUSTED", "DIGITAL-FIRST"]
+    },
+    {
+      "id": "rec-2",
+      "title": "Greyhouse Coffee Supply",
+      "subtitle": "Local Merchant · Ethically sourced",
+      "type": "Local Merchant",
+      "impact": "Ethically Sourced Beans",
+      "cost": "$6.75",
+      "score": 98,
+      "agent_reasoning": "You've visited 3 times this month. High reliability score. Contactless usage up 40% here—no card handoff, secure tap.",
+      "cash_vs_digital": "Earn 3% more value than cash with Visa offers",
+      "badges": ["FAVORITE", "REWARDS", "SECURE"]
+    },
+    {
+      "id": "rec-3",
+      "title": "Purdue Union — Campus Vendors",
+      "subtitle": "Campus · Cashless preferred",
+      "type": "Campus",
+      "impact": "Campus dining & retail",
+      "cost": "$8.00",
+      "score": 96,
+      "agent_reasoning": "312 Visa users nearby. Campus is digital-first; cashless preferred. Aligns with your local & community focus.",
+      "cash_vs_digital": "No cash handling—tap and go",
+      "badges": ["CAMPUS", "CASHLESS", "TRUSTED"]
+    }
+  ]
+}
