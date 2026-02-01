@@ -2,7 +2,7 @@
     "conversation_state_agent1qfsuxw6yaz223jppu974lf2kyuznqeruvy3rnu0pw3m6acmtmxmq7c5yz7k": null,
     "conversation_state_agent1qdag7q4nawz3lplyhqv8pkslsxggxsuf5n5m866826f62frl4ypt5zn02rz": {
         "waiting_for_clarification": true,
-        "original_request": "{\"type\": \"error\", \"message\": \"Unable to parse input string into valid JSON.\\nExpected formats:\\n 1. EventScraperAgent: {\\\"location\\\": \\\"...\\\", \\\"interest_activities\\\": [...], \\\"budget\\\": 500}\\n 2. FundAllocationAgent: {\\\"location\\\": \\\"...\\\", \\\"activities\\\": [...], \\\"budget\\\": 500}\\n 3. Both wrapped: {\\\"events\\\": {...}, \\\"fund\\\": {...}}\", \"received_text\": \"Error processing request: 'NoneType' object has no attribute 'get'\", \"hint\": \"Send JSON from EventScraperAgent or FundAllocationAgent\"} (Location: parse input string into valid JSON) (Budget: $0) (Time: 2026-02-01T09:21:00.000Z to 2026-02-01T23:21:00.000Z)",
+        "original_request": "{\"type\": \"error\", \"message\": \"Unable to parse input string into valid JSON.\\nExpected formats:\\n 1. EventScraperAgent: {\\\"location\\\": \\\"...\\\", \\\"interest_activities\\\": [...], \\\"budget\\\": 500}\\n 2. FundAllocationAgent: {\\\"location\\\": \\\"...\\\", \\\"activities\\\": [...], \\\"budget\\\": 500}\\n 3. Both wrapped: {\\\"events\\\": {...}, \\\"fund\\\": {...}}\", \"received_text\": \"Error processing request: 'NoneType' object has no attribute 'get'\", \"hint\": \"Send JSON from EventScraperAgent or FundAllocationAgent\"} (Location: parse input string into valid JSON) (Budget: $0)",
         "location": "parse input string into valid JSON",
         "budget": "None",
         "start_time": "2026-02-01T09:21:00.000Z",
@@ -65,8 +65,7 @@
         ]
     },
     "processed_message_ids": {
-        "e194aa94-9915-4380-adb5-e9e9bc659f44": "2026-02-01T09:01:19.933924+00:00",
-        "bee78c71-6feb-4231-852c-db7050ce2cd0": "2026-02-01T09:03:21.246276+00:00"
+        "8d499bb5-9c72-45b3-8fa3-765547bc4e24": "2026-02-01T10:25:51.617687+00:00"
     },
     "conversation_state_agent1qddkgq6ugvjkpx5zu5e40g0js88hqpcsj5trh56gqxtjvnrq6xanqzgan6w": null
 }

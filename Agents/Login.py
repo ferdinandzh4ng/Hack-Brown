@@ -8,10 +8,17 @@ import json
 import hashlib
 import secrets
 from datetime import datetime, timedelta
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional, Tuple, List
 from pymongo import MongoClient, ASCENDING
 from pymongo.errors import DuplicateKeyError
 from dotenv import load_dotenv
+try:
+    from cryptography.fernet import Fernet
+    CRYPTOGRAPHY_AVAILABLE = True
+except ImportError:
+    CRYPTOGRAPHY_AVAILABLE = False
+    print("Warning: cryptography library not installed. Payment data will use hashing instead of encryption.")
+import base64
 
 load_dotenv()
 
@@ -80,6 +87,7 @@ class LoginManager:
         try:
             users_collection = self.db["users"]
             sessions_collection = self.db["sessions"]
+            payment_methods_collection = self.db["payment_methods"]
             
             # Create unique index on email
             users_collection.create_index([("email", ASCENDING)], unique=True)
@@ -90,9 +98,61 @@ class LoginManager:
             sessions_collection.create_index([("user_id", ASCENDING)])
             sessions_collection.create_index([("expires_at", ASCENDING)])
             
+            # Create indexes for payment methods
+            payment_methods_collection.create_index([("user_id", ASCENDING)])
+            payment_methods_collection.create_index([("user_id", ASCENDING), ("is_default", ASCENDING)])
+            
             print("MongoDB collections and indexes created successfully")
         except Exception as e:
             print(f"Error setting up collections: {e}")
+    
+    def _get_encryption_key(self) -> bytes:
+        """Get or generate encryption key for payment methods"""
+        key_env = os.getenv("PAYMENT_ENCRYPTION_KEY")
+        if key_env:
+            # Use provided key (should be base64 encoded)
+            try:
+                return base64.urlsafe_b64decode(key_env.encode())
+            except:
+                # If not base64, use as-is (32 bytes)
+                return key_env.encode()[:32].ljust(32, b'0')
+        else:
+            # Generate a key (in production, this should be set in env)
+            # For development, generate a deterministic key
+            key = hashlib.sha256(b"HackBrownPaymentKey2024").digest()
+            return key
+    
+    def _encrypt_payment_data(self, data: str) -> str:
+        """Encrypt payment method data"""
+        if not CRYPTOGRAPHY_AVAILABLE:
+            # Fallback: hash instead of encrypt (less secure but works)
+            return hashlib.sha256(data.encode()).hexdigest()
+        
+        try:
+            key = self._get_encryption_key()
+            f = Fernet(base64.urlsafe_b64encode(key))
+            encrypted = f.encrypt(data.encode())
+            return base64.urlsafe_b64encode(encrypted).decode()
+        except Exception as e:
+            print(f"Encryption error: {e}")
+            # Fallback: hash instead of encrypt (less secure but works)
+            return hashlib.sha256(data.encode()).hexdigest()
+    
+    def _decrypt_payment_data(self, encrypted_data: str) -> str:
+        """Decrypt payment method data"""
+        if not CRYPTOGRAPHY_AVAILABLE:
+            # Cannot decrypt if we only hashed
+            return ""
+        
+        try:
+            key = self._get_encryption_key()
+            f = Fernet(base64.urlsafe_b64encode(key))
+            decoded = base64.urlsafe_b64decode(encrypted_data.encode())
+            decrypted = f.decrypt(decoded)
+            return decrypted.decode()
+        except Exception as e:
+            print(f"Decryption error: {e}")
+            return ""
     
     @staticmethod
     def hash_password(password: str) -> str:
@@ -609,6 +669,203 @@ class LoginManager:
         except Exception as e:
             print(f"Error linking Google account: {e}")
             return False, f"Failed to link Google account: {str(e)}"
+    
+    def add_payment_method(self, user_id: str, card_number: str, expiry_date: str, 
+                          cardholder_name: str, cvv: str, billing_address: Optional[Dict] = None,
+                          is_default: bool = False) -> Tuple[bool, str, Optional[str]]:
+        """
+        Add a payment method for a user (encrypted storage).
+        
+        Args:
+            user_id: MongoDB ObjectId as string
+            card_number: Credit card number (will be encrypted)
+            expiry_date: Card expiry date (MM/YY)
+            cardholder_name: Name on card
+            cvv: CVV code (will be encrypted)
+            billing_address: Optional billing address dict
+            is_default: Whether this should be the default payment method
+        
+        Returns:
+            Tuple of (success: bool, message: str, payment_method_id: Optional[str])
+        """
+        if self.db is None:
+            return False, "Database connection failed", None
+        
+        try:
+            from bson.objectid import ObjectId
+            payment_methods_collection = self.db["payment_methods"]
+            
+            # Encrypt sensitive data
+            encrypted_card = self._encrypt_payment_data(card_number)
+            encrypted_cvv = self._encrypt_payment_data(cvv)
+            
+            # If this is set as default, unset other defaults
+            if is_default:
+                payment_methods_collection.update_many(
+                    {"user_id": ObjectId(user_id), "is_default": True},
+                    {"$set": {"is_default": False}}
+                )
+            
+            # Store last 4 digits for display (not encrypted)
+            last_4 = card_number[-4:] if len(card_number) >= 4 else "****"
+            
+            payment_method = {
+                "user_id": ObjectId(user_id),
+                "card_number_encrypted": encrypted_card,
+                "cvv_encrypted": encrypted_cvv,
+                "expiry_date": expiry_date,
+                "cardholder_name": cardholder_name,
+                "last_4": last_4,
+                "billing_address": billing_address or {},
+                "is_default": is_default,
+                "created_at": datetime.utcnow(),
+                "updated_at": datetime.utcnow()
+            }
+            
+            result = payment_methods_collection.insert_one(payment_method)
+            payment_method_id = str(result.inserted_id)
+            
+            return True, "Payment method added successfully", payment_method_id
+            
+        except Exception as e:
+            print(f"Error adding payment method: {e}")
+            return False, f"Failed to add payment method: {str(e)}", None
+    
+    def get_payment_methods(self, user_id: str) -> List[Dict]:
+        """
+        Get all payment methods for a user (decrypted for display).
+        
+        Args:
+            user_id: MongoDB ObjectId as string
+        
+        Returns:
+            List of payment method dicts (with masked card numbers)
+        """
+        if self.db is None:
+            return []
+        
+        try:
+            from bson.objectid import ObjectId
+            payment_methods_collection = self.db["payment_methods"]
+            
+            methods = list(payment_methods_collection.find(
+                {"user_id": ObjectId(user_id)},
+                {"card_number_encrypted": 0, "cvv_encrypted": 0}  # Don't return encrypted data
+            ).sort("is_default", -1))
+            
+            # Convert ObjectId to string and format for frontend
+            result = []
+            for method in methods:
+                result.append({
+                    "id": str(method["_id"]),
+                    "last_4": method.get("last_4", "****"),
+                    "expiry_date": method.get("expiry_date", ""),
+                    "cardholder_name": method.get("cardholder_name", ""),
+                    "billing_address": method.get("billing_address", {}),
+                    "is_default": method.get("is_default", False),
+                    "created_at": method.get("created_at", datetime.utcnow()).isoformat() if isinstance(method.get("created_at"), datetime) else None
+                })
+            
+            return result
+            
+        except Exception as e:
+            print(f"Error getting payment methods: {e}")
+            return []
+    
+    def delete_payment_method(self, user_id: str, payment_method_id: str) -> Tuple[bool, str]:
+        """
+        Delete a payment method.
+        
+        Args:
+            user_id: MongoDB ObjectId as string
+            payment_method_id: Payment method ObjectId as string
+        
+        Returns:
+            Tuple of (success: bool, message: str)
+        """
+        if self.db is None:
+            return False, "Database connection failed"
+        
+        try:
+            from bson.objectid import ObjectId
+            payment_methods_collection = self.db["payment_methods"]
+            
+            result = payment_methods_collection.delete_one({
+                "_id": ObjectId(payment_method_id),
+                "user_id": ObjectId(user_id)
+            })
+            
+            if result.deleted_count == 0:
+                return False, "Payment method not found"
+            
+            return True, "Payment method deleted successfully"
+            
+        except Exception as e:
+            print(f"Error deleting payment method: {e}")
+            return False, f"Failed to delete payment method: {str(e)}"
+    
+    def set_default_payment_method(self, user_id: str, payment_method_id: str) -> Tuple[bool, str]:
+        """
+        Set a payment method as default.
+        
+        Args:
+            user_id: MongoDB ObjectId as string
+            payment_method_id: Payment method ObjectId as string
+        
+        Returns:
+            Tuple of (success: bool, message: str)
+        """
+        if self.db is None:
+            return False, "Database connection failed"
+        
+        try:
+            from bson.objectid import ObjectId
+            payment_methods_collection = self.db["payment_methods"]
+            
+            # Unset all other defaults
+            payment_methods_collection.update_many(
+                {"user_id": ObjectId(user_id), "is_default": True},
+                {"$set": {"is_default": False}}
+            )
+            
+            # Set this one as default
+            result = payment_methods_collection.update_one(
+                {"_id": ObjectId(payment_method_id), "user_id": ObjectId(user_id)},
+                {"$set": {"is_default": True, "updated_at": datetime.utcnow()}}
+            )
+            
+            if result.matched_count == 0:
+                return False, "Payment method not found"
+            
+            return True, "Default payment method updated successfully"
+            
+        except Exception as e:
+            print(f"Error setting default payment method: {e}")
+            return False, f"Failed to set default payment method: {str(e)}"
+    
+    def has_payment_methods(self, user_id: str) -> bool:
+        """
+        Check if user has any payment methods.
+        
+        Args:
+            user_id: MongoDB ObjectId as string
+        
+        Returns:
+            True if user has at least one payment method
+        """
+        if self.db is None:
+            return False
+        
+        try:
+            from bson.objectid import ObjectId
+            payment_methods_collection = self.db["payment_methods"]
+            
+            count = payment_methods_collection.count_documents({"user_id": ObjectId(user_id)})
+            return count > 0
+            
+        except Exception as e:
+            print(f"Error checking payment methods: {e}")
+            return False
 
 
 # Example usage

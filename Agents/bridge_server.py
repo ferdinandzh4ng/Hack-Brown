@@ -11,7 +11,7 @@ import signal
 import sys
 from datetime import datetime, timezone, timedelta
 from uuid import uuid4
-from typing import Optional
+from typing import Optional, Tuple, List
 from dotenv import load_dotenv
 
 from fastapi import FastAPI, HTTPException
@@ -41,6 +41,12 @@ load_dotenv()
 ORCHESTRATOR_AGENT_ADDRESS = os.getenv(
     "ORCHESTRATOR_AGENT_ADDRESS",
     "agent1qg2akmff6ke58spye465yje4e5fvdk6faku59h2akjjtu5hmkf8rqy346qj"
+)
+
+# Booking agent address
+BOOKING_AGENT_ADDRESS = os.getenv(
+    "BOOKING_AGENT_ADDRESS",
+    ""  # Will be set when agent is registered
 )
 
 # Shared state for bridge communication
@@ -241,6 +247,104 @@ class ScheduleResponse(BaseModel):
     success: bool
     data: Optional[dict] = None
     error: Optional[str] = None
+
+class BookingRequest(BaseModel):
+    items: List[dict]  # List of itinerary items
+    location: str
+
+class BookingResponse(BaseModel):
+    success: bool
+    data: Optional[dict] = None
+    error: Optional[str] = None
+
+def extract_activities_and_budget(user_request: str) -> Tuple[list, float]:
+    """Extract activities and budget from user request"""
+    # Extract activities from user_request (simple keyword matching)
+    activities = []
+    user_lower = user_request.lower()
+    if any(word in user_lower for word in ["eat", "dining", "food", "restaurant"]):
+        activities.append("dining")
+    if any(word in user_lower for word in ["sightsee", "sight", "tour", "visit", "see"]):
+        activities.append("sightseeing")
+    if any(word in user_lower for word in ["entertainment", "show", "movie", "concert", "theater"]):
+        activities.append("entertainment")
+    if any(word in user_lower for word in ["transit", "transport", "travel"]):
+        activities.append("transit")
+    
+    # Default activities if none found
+    if not activities:
+        activities = ["sightseeing", "dining", "entertainment"]
+    
+    # Estimate budget from user request or use default
+    budget = 500.0  # Default budget
+    if "$" in user_request:
+        import re
+        budget_matches = re.findall(r'\$(\d+)', user_request)
+        if budget_matches:
+            budget = float(budget_matches[0])
+    
+    return activities, budget
+
+async def call_gemini_fallback(
+    user_request: str,
+    location: str,
+    start_time: str,
+    end_time: str
+) -> dict:
+    """Call Gemini fallback with extracted activities and budget"""
+    if not GEMINI_FALLBACK_AVAILABLE:
+        return {
+            "error": "Gemini fallback not available.",
+            "fallback_attempted": False
+        }
+    
+    try:
+        activities, budget = extract_activities_and_budget(user_request)
+        
+        print(f"Calling Gemini fallback with: location={location}, budget={budget}, activities={activities}")
+        gemini_result = generate_schedule_with_gemini(
+            location=location,
+            budget=budget,
+            interest_activities=activities,
+            start_time=start_time,
+            end_time=end_time,
+            user_request=user_request
+        )
+        
+        if gemini_result and not gemini_result.get("error"):
+            print(f"✓ Gemini fallback succeeded, returning schedule")
+            return gemini_result
+        else:
+            gemini_error = gemini_result.get("error", "Unknown Gemini error") if gemini_result else "No response from Gemini"
+            print(f"✗ Gemini fallback failed: {gemini_error}")
+            
+            # Check if it's a quota error (429)
+            is_quota_error = "429" in str(gemini_error) or "quota" in str(gemini_error).lower() or "rate limit" in str(gemini_error).lower()
+            
+            if is_quota_error:
+                print(f"Gemini quota exceeded - generating simple fallback schedule")
+                activities, budget = extract_activities_and_budget(user_request)
+                # Generate a simple fallback schedule without API
+                return generate_simple_fallback_schedule(
+                    location=location,
+                    budget=budget,
+                    activities=activities,
+                    start_time=start_time,
+                    end_time=end_time
+                )
+            else:
+                return {
+                    "error": f"Gemini fallback failed: {gemini_error}",
+                    "fallback_attempted": True
+                }
+    except Exception as gemini_err:
+        print(f"✗ Exception in Gemini fallback: {gemini_err}")
+        import traceback
+        traceback.print_exc()
+        return {
+            "error": f"Gemini fallback error: {str(gemini_err)}",
+            "fallback_attempted": True
+        }
 
 def generate_simple_fallback_schedule(
     location: str,
@@ -450,7 +554,30 @@ async def send_to_orchestrator(user_request: str, location: str, start_time: str
             if response_text:
                 try:
                     response_data = json.loads(response_text)
-                    print(f"✓ Successfully parsed JSON response, returning to frontend")
+                    print(f"✓ Successfully parsed JSON response")
+                    
+                    # Check if orchestrator returned error or clarification_needed - use Gemini fallback
+                    response_type = response_data.get("type")
+                    if response_type == "clarification_needed" or response_type == "error":
+                        error_type = "clarification_needed" if response_type == "clarification_needed" else "error"
+                        print(f"Orchestrator returned {error_type} - calling Gemini fallback...")
+                        if response_type == "error":
+                            print(f"Error message: {response_data.get('message', 'Unknown error')}")
+                        gemini_result = await call_gemini_fallback(
+                            user_request=user_request,
+                            location=location,
+                            start_time=start_time,
+                            end_time=end_time
+                        )
+                        if gemini_result and not gemini_result.get("error"):
+                            print(f"✓ Gemini fallback succeeded after {error_type}")
+                            return gemini_result
+                        else:
+                            # If Gemini fallback also fails, return the original error
+                            print(f"✗ Gemini fallback failed, returning original {error_type} response")
+                            return response_data
+                    
+                    print(f"Returning response to frontend")
                     return response_data
                 except json.JSONDecodeError as e:
                     print(f"✗ JSON parse error: {e}")
@@ -468,79 +595,20 @@ async def send_to_orchestrator(user_request: str, location: str, start_time: str
             
             # Call Gemini fallback after timeout
             print(f"Orchestrator timeout - calling Gemini fallback...")
-            if GEMINI_FALLBACK_AVAILABLE:
-                try:
-                    # Extract activities from user_request (simple keyword matching)
-                    activities = []
-                    user_lower = user_request.lower()
-                    if any(word in user_lower for word in ["eat", "dining", "food", "restaurant"]):
-                        activities.append("dining")
-                    if any(word in user_lower for word in ["sightsee", "sight", "tour", "visit", "see"]):
-                        activities.append("sightseeing")
-                    if any(word in user_lower for word in ["entertainment", "show", "movie", "concert", "theater"]):
-                        activities.append("entertainment")
-                    if any(word in user_lower for word in ["transit", "transport", "travel"]):
-                        activities.append("transit")
-                    
-                    # Default activities if none found
-                    if not activities:
-                        activities = ["sightseeing", "dining", "entertainment"]
-                    
-                    # Estimate budget from user request or use default
-                    budget = 500.0  # Default budget
-                    if "$" in user_request:
-                        import re
-                        budget_matches = re.findall(r'\$(\d+)', user_request)
-                        if budget_matches:
-                            budget = float(budget_matches[0])
-                    
-                    print(f"Calling Gemini fallback with: location={location}, budget={budget}, activities={activities}")
-                    gemini_result = generate_schedule_with_gemini(
-                        location=location,
-                        budget=budget,
-                        interest_activities=activities,
-                        start_time=start_time,
-                        end_time=end_time,
-                        user_request=user_request
-                    )
-                    
-                    if gemini_result and not gemini_result.get("error"):
-                        print(f"✓ Gemini fallback succeeded, returning schedule")
-                        return gemini_result
-                    else:
-                        gemini_error = gemini_result.get("error", "Unknown Gemini error") if gemini_result else "No response from Gemini"
-                        print(f"✗ Gemini fallback failed: {gemini_error}")
-                        
-                        # Check if it's a quota error (429)
-                        is_quota_error = "429" in str(gemini_error) or "quota" in str(gemini_error).lower() or "rate limit" in str(gemini_error).lower()
-                        
-                        if is_quota_error:
-                            print(f"Gemini quota exceeded - generating simple fallback schedule")
-                            # Generate a simple fallback schedule without API
-                            return generate_simple_fallback_schedule(
-                                location=location,
-                                budget=budget,
-                                activities=activities,
-                                start_time=start_time,
-                                end_time=end_time
-                            )
-                        else:
-                            return {
-                                "error": f"Orchestrator timeout and Gemini fallback failed: {gemini_error}",
-                                "fallback_attempted": True
-                            }
-                except Exception as gemini_err:
-                    print(f"✗ Exception in Gemini fallback: {gemini_err}")
-                    import traceback
-                    traceback.print_exc()
-                    return {
-                        "error": f"Orchestrator timeout and Gemini fallback error: {str(gemini_err)}",
-                        "fallback_attempted": True
-                    }
+            gemini_result = await call_gemini_fallback(
+                user_request=user_request,
+                location=location,
+                start_time=start_time,
+                end_time=end_time
+            )
+            if gemini_result and not gemini_result.get("error"):
+                return gemini_result
             else:
+                # If Gemini fallback failed, return error
+                error_msg = gemini_result.get("error", "Unknown error") if gemini_result else "No response from Gemini"
                 return {
-                    "error": "Timeout waiting for response from orchestrator (30s). Gemini fallback not available.",
-                    "fallback_attempted": False
+                    "error": f"Orchestrator timeout and Gemini fallback failed: {error_msg}",
+                    "fallback_attempted": True
                 }
                 
     except Exception as e:
@@ -582,6 +650,91 @@ async def create_schedule(request: ScheduleRequest):
 async def health_check():
     """Health check endpoint"""
     return {"status": "ok", "orchestrator_address": ORCHESTRATOR_AGENT_ADDRESS}
+
+async def send_to_booking_agent(items: List[dict], location: str) -> dict:
+    """Send booking request to booking agent via HTTP (direct call, no mailbox needed)"""
+    # Get booking agent HTTP URL from env or use default
+    booking_url = os.getenv("BOOKING_AGENT_HTTP_URL", "http://localhost:8007/api/booking")
+    
+    try:
+        # Try using aiohttp first (async)
+        try:
+            import aiohttp
+            print(f"Sending booking request to {booking_url}")
+            
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    booking_url,
+                    json={"items": items, "location": location},
+                    timeout=aiohttp.ClientTimeout(total=30)
+                ) as response:
+                    if response.status != 200:
+                        error_text = await response.text()
+                        return {"error": f"Booking agent HTTP error {response.status}: {error_text}"}
+                    
+                    result = await response.json()
+                    print(f"✓ Received booking response from HTTP endpoint")
+                    
+                    if not result.get("success", False):
+                        return {"error": result.get("error", "Unknown error from booking agent")}
+                    
+                    return result.get("data", {})
+        except ImportError:
+            # Fallback to requests library (sync, run in thread pool)
+            import requests
+            print(f"Sending booking request to {booking_url} (using requests)")
+            
+            def make_request():
+                return requests.post(
+                    booking_url,
+                    json={"items": items, "location": location},
+                    timeout=30
+                )
+            
+            loop = asyncio.get_event_loop()
+            response = await loop.run_in_executor(None, make_request)
+            
+            if response.status_code != 200:
+                return {"error": f"Booking agent HTTP error {response.status_code}: {response.text}"}
+            
+            result = response.json()
+            print(f"✓ Received booking response from HTTP endpoint")
+            
+            if not result.get("success", False):
+                return {"error": result.get("error", "Unknown error from booking agent")}
+            
+            return result.get("data", {})
+                
+    except Exception as e:
+        import traceback
+        error_trace = traceback.format_exc()
+        print(f"✗ Error calling booking agent: {error_trace}")
+        return {"error": f"Failed to call booking agent: {str(e)}"}
+
+@app.post("/api/booking", response_model=BookingResponse)
+async def create_booking(request: BookingRequest):
+    """Create bookings and process payments for selected itinerary items"""
+    try:
+        # Validate inputs
+        if not request.items or len(request.items) == 0:
+            raise HTTPException(status_code=400, detail="items list cannot be empty")
+        
+        if not request.location:
+            raise HTTPException(status_code=400, detail="location is required")
+        
+        # Send request to booking agent
+        response = await send_to_booking_agent(request.items, request.location)
+        
+        if "error" in response:
+            return BookingResponse(success=False, error=response["error"])
+        
+        if not response.get("success", False):
+            return BookingResponse(success=False, error=response.get("error", "Unknown error"))
+        
+        return BookingResponse(success=True, data=response)
+        
+    except Exception as e:
+        return BookingResponse(success=False, error=str(e))
 
 @app.post("/api/reset")
 async def reset_state():

@@ -22,6 +22,10 @@ import {
   Moon,
   Check,
   ArrowRight,
+  User,
+  LogOut,
+  Settings,
+  ChevronDown,
 } from "lucide-react";
 import insightsData from "@/data/insights.json";
 import { City } from "country-state-city";
@@ -344,7 +348,7 @@ export default function HelpingHandApp() {
       return;
     }
     
-    // Check onboarding status
+    // Check onboarding status and load user data
     const checkOnboarding = async () => {
       try {
         const { verifySession } = await import("@/lib/auth");
@@ -352,6 +356,9 @@ export default function HelpingHandApp() {
         if (result.success && result.onboarding_required) {
           router.replace("/onboarding");
           return;
+        }
+        if (result.success && result.user) {
+          setUser(result.user);
         }
         setAuthChecked(true);
       } catch (err) {
@@ -362,6 +369,32 @@ export default function HelpingHandApp() {
     };
     
     checkOnboarding();
+  }, [router]);
+
+  const handleLogout = useCallback(async () => {
+    const token = typeof localStorage !== "undefined"
+      ? localStorage.getItem("session_token")
+      : null;
+    
+    if (token) {
+      try {
+        const AUTH_API_URL = process.env.NEXT_PUBLIC_AUTH_API_URL ?? '';
+        if (AUTH_API_URL) {
+          await fetch(`${AUTH_API_URL.replace(/\/$/, '')}/auth/logout`, {
+            method: "POST",
+            headers: {
+              "Authorization": `Bearer ${token}`,
+              "Content-Type": "application/json",
+            },
+          });
+        }
+      } catch (err) {
+        console.error("Logout error:", err);
+      }
+    }
+    
+    localStorage.removeItem("session_token");
+    router.replace("/login");
   }, [router]);
 
   // Form state
@@ -375,6 +408,10 @@ export default function HelpingHandApp() {
   >([]);
   const [transitInfo, setTransitInfo] = useState<Map<number, any>>(new Map());
   const [apiBudget, setApiBudget] = useState<number | null>(null);
+  const [isBooking, setIsBooking] = useState(false);
+  const [bookingResult, setBookingResult] = useState<any>(null);
+  const [user, setUser] = useState<any>(null);
+  const [showUserMenu, setShowUserMenu] = useState(false);
 
   // Get all cities from library and format for dropdown
   const citiesList = useMemo(() => {
@@ -656,11 +693,20 @@ export default function HelpingHandApp() {
     setIsLoading(true);
     setViewState("THINKING");
 
+    const controller = new AbortController();
+    let timeoutId: NodeJS.Timeout | null = null;
+    let isTimeout = false;
+
     try {
       const startTimeISO = new Date(startTime).toISOString();
       const endTimeISO = new Date(endTime).toISOString();
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 10000);
+      
+      // Set timeout to abort after 60 seconds (backend can take up to 30s for orchestrator + startup time)
+      timeoutId = setTimeout(() => {
+        isTimeout = true;
+        controller.abort();
+      }, 600000);
+
       const response = await fetch("http://localhost:8005/api/schedule", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -672,7 +718,13 @@ export default function HelpingHandApp() {
         }),
         signal: controller.signal,
       });
-      clearTimeout(timeoutId);
+
+      // Clear timeout if request completed successfully
+      if (timeoutId) {
+        clearTimeout(timeoutId);
+        timeoutId = null;
+      }
+
       if (!response.ok) throw new Error(`API error: ${response.statusText}`);
       const result = await response.json();
       if (!result.success) throw new Error(result.error || "Unknown error");
@@ -692,12 +744,31 @@ export default function HelpingHandApp() {
         setViewState("IDLE");
       }
     } catch (err) {
-      console.error("Search error:", err);
-      setError(
-        err instanceof Error ? err.message : "Failed to create schedule",
-      );
+      // Clear timeout in case of error
+      if (timeoutId) {
+        clearTimeout(timeoutId);
+        timeoutId = null;
+      }
+
+      // Handle AbortError specifically
+      if (err instanceof Error && err.name === "AbortError") {
+        if (isTimeout) {
+          setError("Request timed out. Please try again or check your connection.");
+        } else {
+          setError("Request was cancelled.");
+        }
+      } else {
+        console.error("Search error:", err);
+        setError(
+          err instanceof Error ? err.message : "Failed to create schedule",
+        );
+      }
       setViewState("IDLE");
     } finally {
+      // Ensure timeout is always cleared
+      if (timeoutId) {
+        clearTimeout(timeoutId);
+      }
       setIsLoading(false);
     }
   }, [chatInput, location, startTime, endTime, transformBackendResponse]);
@@ -727,6 +798,97 @@ export default function HelpingHandApp() {
       return combined;
     });
   }, [activeGroupItems]);
+
+  const [showPaymentModal, setShowPaymentModal] = useState(false);
+
+  const checkPaymentMethod = useCallback(async (): Promise<boolean> => {
+    const token = typeof localStorage !== "undefined"
+      ? localStorage.getItem("session_token")
+      : null;
+    
+    if (!token) return false;
+    
+    try {
+      const AUTH_API_URL = process.env.NEXT_PUBLIC_AUTH_API_URL ?? '';
+      if (!AUTH_API_URL) return true; // Skip check if no auth API
+      
+      const response = await fetch(`${AUTH_API_URL.replace(/\/$/, '')}/auth/payment-methods/check`, {
+        method: "GET",
+        headers: {
+          "Authorization": `Bearer ${token}`,
+          "Content-Type": "application/json",
+        },
+      });
+      
+      if (!response.ok) return false;
+      const result = await response.json();
+      return result.has_payment_methods === true;
+    } catch (err) {
+      console.error("Payment method check error:", err);
+      return false;
+    }
+  }, []);
+
+  const handleConfirmAndBook = useCallback(async () => {
+    if (selectedIds.length === 0) {
+      setError("Please select at least one activity to book");
+      return;
+    }
+
+    // Check for payment method
+    const hasPaymentMethod = await checkPaymentMethod();
+    if (!hasPaymentMethod) {
+      setShowPaymentModal(true);
+      return;
+    }
+
+    setIsBooking(true);
+    setError(null);
+    setBookingResult(null);
+
+    try {
+      // Get selected items
+      const selectedItems = itemsForView
+        .filter((r) => selectedIds.includes(r.id))
+        .map((r) => ({
+          id: r.id,
+          title: r.title,
+          cost: r.cost,
+          startTime: r.startTime,
+          endTime: r.endTime,
+          address: r.address,
+          coordinates: r.coordinates,
+          agent_reasoning: r.agent_reasoning,
+        }));
+
+      const response = await fetch("http://localhost:8005/api/booking", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          items: selectedItems,
+          location: location || "Unknown",
+        }),
+      });
+
+      if (!response.ok) throw new Error(`API error: ${response.statusText}`);
+      const result = await response.json();
+      
+      if (!result.success) {
+        throw new Error(result.error || "Unknown error");
+      }
+
+      setBookingResult(result.data);
+      setError(null);
+    } catch (err) {
+      console.error("Booking error:", err);
+      setError(
+        err instanceof Error ? err.message : "Failed to process booking",
+      );
+      setBookingResult(null);
+    } finally {
+      setIsBooking(false);
+    }
+  }, [selectedIds, itemsForView, location, checkPaymentMethod]);
 
   // Route line only when 2+ items selected: time-sorted path (e.g. 08:00 Starbucks → next selected)
   const selectionPathGeoJSON = useMemo(() => {
@@ -878,21 +1040,88 @@ export default function HelpingHandApp() {
           </div>
         )}
 
-        {/* Dark / Light toggle – top right over map */}
-        <button
-          type="button"
-          onClick={() => setIsDarkMode((d) => !d)}
-          className={`absolute top-3 right-3 z-10 p-2 rounded-xl shadow-lg transition-colors ${
-            isDarkMode
-              ? "bg-slate-700 text-visa-gold"
-              : "bg-white text-visa-blue"
-          }`}
-          aria-label={
-            isDarkMode ? "Switch to light mode" : "Switch to dark mode"
-          }
-        >
-          {isDarkMode ? <Sun size={20} /> : <Moon size={20} />}
-        </button>
+        {/* User menu and Dark / Light toggle – top right over map */}
+        <div className="absolute top-3 right-3 z-10 flex items-center gap-2">
+          {/* Dark / Light toggle */}
+          <button
+            type="button"
+            onClick={() => setIsDarkMode((d) => !d)}
+            className={`p-2 rounded-xl shadow-lg transition-colors ${
+              isDarkMode
+                ? "bg-slate-700 text-visa-gold"
+                : "bg-white text-visa-blue"
+            }`}
+            aria-label={
+              isDarkMode ? "Switch to light mode" : "Switch to dark mode"
+            }
+          >
+            {isDarkMode ? <Sun size={20} /> : <Moon size={20} />}
+          </button>
+          
+          {/* User menu */}
+          {user && (
+            <div className="relative">
+              <button
+                type="button"
+                onClick={() => setShowUserMenu(!showUserMenu)}
+                className={`flex items-center gap-2 px-3 py-2 rounded-xl shadow-lg transition-colors ${
+                  isDarkMode
+                    ? "bg-slate-700 text-slate-100 hover:bg-slate-600"
+                    : "bg-white text-slate-900 hover:bg-slate-50"
+                }`}
+                aria-label="User menu"
+              >
+                <User size={18} />
+                <span className="text-sm font-medium hidden sm:inline">
+                  {user.username || user.email?.split("@")[0] || "User"}
+                </span>
+                <ChevronDown size={16} className={showUserMenu ? "rotate-180" : ""} />
+              </button>
+              
+              {showUserMenu && (
+                <>
+                  <div
+                    className="fixed inset-0 z-10"
+                    onClick={() => setShowUserMenu(false)}
+                  />
+                  <div
+                    className={`absolute right-0 mt-2 w-48 rounded-xl shadow-xl z-20 ${
+                      isDarkMode ? "bg-slate-800" : "bg-white"
+                    } border ${isDarkMode ? "border-slate-700" : "border-slate-200"}`}
+                  >
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setShowUserMenu(false);
+                        router.push("/profile");
+                      }}
+                      className={`w-full flex items-center gap-3 px-4 py-3 text-left hover:bg-slate-100 transition-colors first:rounded-t-xl ${
+                        isDarkMode
+                          ? "hover:bg-slate-700 text-slate-100"
+                          : "text-slate-900"
+                      }`}
+                    >
+                      <Settings size={18} />
+                      <span className="text-sm font-medium">Profile & Settings</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleLogout}
+                      className={`w-full flex items-center gap-3 px-4 py-3 text-left hover:bg-slate-100 transition-colors last:rounded-b-xl ${
+                        isDarkMode
+                          ? "hover:bg-slate-700 text-slate-100"
+                          : "text-slate-900"
+                      }`}
+                    >
+                      <LogOut size={18} />
+                      <span className="text-sm font-medium">Logout</span>
+                    </button>
+                  </div>
+                </>
+              )}
+            </div>
+          )}
+        </div>
       </div>
 
       {/* IDLE: Floating input window (top-left, Google Maps style) */}
@@ -1228,21 +1457,49 @@ export default function HelpingHandApp() {
               }`}
             >
               {displayMode === "single" ? (
-                <div className="space-y-4">
-                  {itemsForView.map((rec) => (
-                    <ImpromptuCard
-                      key={rec.id}
-                      rec={rec}
-                      isSelected={selectedIds.includes(rec.id)}
-                      isHighlighted={highlightedCardId === rec.id}
-                      cardBg={cardBg}
-                      drawerText={drawerText}
-                      drawerMuted={drawerMuted}
-                      isDarkMode={isDarkMode}
-                      onAuthorize={handleAuthorize}
-                    />
-                  ))}
-                </div>
+                <>
+                  <div className="space-y-4">
+                    {itemsForView.map((rec) => (
+                      <ImpromptuCard
+                        key={rec.id}
+                        rec={rec}
+                        isSelected={selectedIds.includes(rec.id)}
+                        isHighlighted={highlightedCardId === rec.id}
+                        cardBg={cardBg}
+                        drawerText={drawerText}
+                        drawerMuted={drawerMuted}
+                        isDarkMode={isDarkMode}
+                        onAuthorize={handleAuthorize}
+                      />
+                    ))}
+                  </div>
+                  {selectedIds.length > 0 && (
+                    <div className={`mt-6 pt-6 border-t ${drawerBorder}`}>
+                      <button
+                        type="button"
+                        onClick={handleConfirmAndBook}
+                        disabled={isBooking}
+                        className={`font-heading w-full py-4 rounded-xl font-bold text-sm tracking-tight transition-all ${
+                          isBooking
+                            ? "bg-slate-400 text-white cursor-not-allowed"
+                            : "bg-emerald-600 text-white hover:bg-emerald-700"
+                        }`}
+                      >
+                        {isBooking ? (
+                          <>
+                            <span className="inline-block animate-spin mr-2">⏳</span>
+                            Processing bookings...
+                          </>
+                        ) : (
+                          <>
+                            ✓ Confirm & Book ({selectedIds.length} item
+                            {selectedIds.length !== 1 ? "s" : ""})
+                          </>
+                        )}
+                      </button>
+                    </div>
+                  )}
+                </>
               ) : (
                 <div className="w-full pl-2">
                   {activeGroupItems.length === 0 ? (
@@ -1292,7 +1549,7 @@ export default function HelpingHandApp() {
                           );
                         })}
                       </div>
-                      <div className={`mt-6 pt-6 border-t ${drawerBorder}`}>
+                      <div className={`mt-6 pt-6 border-t ${drawerBorder} space-y-3`}>
                         <button
                           type="button"
                           onClick={handleAuthorizeFullItinerary}
@@ -1317,12 +1574,105 @@ export default function HelpingHandApp() {
                             </>
                           )}
                         </button>
+                        {selectedIds.length > 0 && (
+                          <button
+                            type="button"
+                            onClick={handleConfirmAndBook}
+                            disabled={isBooking}
+                            className={`font-heading w-full py-4 rounded-xl font-bold text-sm tracking-tight transition-all ${
+                              isBooking
+                                ? "bg-slate-400 text-white cursor-not-allowed"
+                                : "bg-emerald-600 text-white hover:bg-emerald-700"
+                            }`}
+                          >
+                            {isBooking ? (
+                              <>
+                                <span className="inline-block animate-spin mr-2">⏳</span>
+                                Processing bookings...
+                              </>
+                            ) : (
+                              <>
+                                ✓ Confirm & Book ({selectedIds.length} item
+                                {selectedIds.length !== 1 ? "s" : ""})
+                              </>
+                            )}
+                          </button>
+                        )}
                       </div>
                     </>
                   )}
                 </div>
               )}
             </div>
+
+            {/* Booking Results */}
+            {bookingResult && (
+              <div
+                className={`p-4 border-t ${drawerBorder} ${drawerBg} shrink-0 max-h-64 overflow-y-auto ${
+                  isDarkMode ? "scrollbar-drawer-dark" : "scrollbar-drawer"
+                }`}
+              >
+                <h4 className={`font-heading font-bold text-sm mb-2 ${drawerText}`}>
+                  Booking Results
+                </h4>
+                <div className="space-y-2">
+                  {bookingResult.bookings?.map((booking: any, idx: number) => (
+                    <div
+                      key={idx}
+                      className={`p-2 rounded-lg text-xs ${
+                        booking.booking_status === "success"
+                          ? isDarkMode
+                            ? "bg-emerald-500/20 text-emerald-300"
+                            : "bg-emerald-50 text-emerald-700"
+                          : booking.booking_status === "payment_required"
+                            ? isDarkMode
+                              ? "bg-yellow-500/20 text-yellow-300"
+                              : "bg-yellow-50 text-yellow-700"
+                            : isDarkMode
+                              ? "bg-slate-700 text-slate-300"
+                              : "bg-slate-100 text-slate-600"
+                      }`}
+                    >
+                      <div className="font-semibold">{booking.item_title}</div>
+                      <div className="text-[10px] mt-0.5">
+                        {booking.booking_status === "success" && (
+                          <>
+                            ✓ Booked
+                            {booking.confirmation_code && (
+                              <> • Code: {booking.confirmation_code}</>
+                            )}
+                            {booking.payment_status === "paid" && (
+                              <> • Paid: ${booking.payment_amount?.toFixed(2)}</>
+                            )}
+                          </>
+                        )}
+                        {booking.booking_status === "payment_required" && (
+                          <>⚠ Payment required at venue</>
+                        )}
+                        {booking.booking_status === "not_required" && (
+                          <>ℹ No booking required</>
+                        )}
+                        {booking.error_message && (
+                          <div className="mt-1 text-red-400">
+                            {booking.error_message}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+                {bookingResult.summary && (
+                  <div className={`mt-3 pt-3 border-t ${drawerBorder} text-xs ${drawerMuted}`}>
+                    <div>
+                      Total Paid: ${bookingResult.total_paid?.toFixed(2) || "0.00"}
+                    </div>
+                    <div>
+                      Items Booked: {bookingResult.summary.items_booked_successfully || 0}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
 
             {/* Refine Search Input */}
             <div
@@ -1344,6 +1694,68 @@ export default function HelpingHandApp() {
                 </button>
               </div>
             </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Payment Method Required Modal */}
+      <AnimatePresence>
+        {showPaymentModal && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
+            onClick={() => setShowPaymentModal(false)}
+          >
+            <motion.div
+              initial={{ scale: 0.95, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.95, opacity: 0 }}
+              onClick={(e) => e.stopPropagation()}
+              className={`w-full max-w-md ${drawerBg} rounded-2xl shadow-2xl p-6`}
+            >
+              <div className="flex items-center justify-between mb-4">
+                <h3 className={`font-heading text-lg font-bold ${drawerText}`}>
+                  Payment Method Required
+                </h3>
+                <button
+                  type="button"
+                  onClick={() => setShowPaymentModal(false)}
+                  className={`p-1 rounded-lg ${isDarkMode ? "hover:bg-slate-700" : "hover:bg-slate-100"}`}
+                >
+                  <X size={20} className={drawerMuted} />
+                </button>
+              </div>
+              
+              <p className={`font-sans text-sm mb-6 ${drawerMuted}`}>
+                You need to add a payment method before booking activities. Please set up a payment method in your profile.
+              </p>
+              
+              <div className="flex gap-3">
+                <button
+                  type="button"
+                  onClick={() => setShowPaymentModal(false)}
+                  className={`flex-1 py-2.5 px-4 rounded-xl font-medium text-sm transition-colors ${
+                    isDarkMode
+                      ? "bg-slate-700 text-slate-200 hover:bg-slate-600"
+                      : "bg-slate-100 text-slate-700 hover:bg-slate-200"
+                  }`}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowPaymentModal(false);
+                    router.push("/profile");
+                  }}
+                  className="flex-1 py-2.5 px-4 rounded-xl font-medium text-sm bg-visa-blue text-white hover:bg-visa-blue-dark transition-colors"
+                >
+                  Go to Profile
+                </button>
+              </div>
+            </motion.div>
           </motion.div>
         )}
       </AnimatePresence>

@@ -60,6 +60,17 @@ class UpdatePreferencesRequest(BaseModel):
     favorite_stores: Optional[list[str]] = None
     budget_range: Optional[dict] = None
 
+class AddPaymentMethodRequest(BaseModel):
+    card_number: str
+    expiry_date: str  # MM/YY format
+    cardholder_name: str
+    cvv: str
+    billing_address: Optional[dict] = None
+    is_default: Optional[bool] = False
+
+class SetDefaultPaymentMethodRequest(BaseModel):
+    payment_method_id: str
+
 # API Endpoints
 @app.post("/auth/register")
 async def register(request: RegisterRequest):
@@ -304,6 +315,153 @@ async def logout(authorization: Optional[str] = Header(None)):
         raise HTTPException(status_code=400, detail="Logout failed")
     
     return {"success": True, "message": "Logged out successfully"}
+
+@app.get("/auth/payment-methods")
+async def get_payment_methods(authorization: Optional[str] = Header(None)):
+    """Get user's payment methods"""
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing or invalid authorization header")
+    
+    token = authorization.replace("Bearer ", "")
+    is_valid, user_data = login_manager.verify_session(token)
+    
+    if not is_valid:
+        raise HTTPException(status_code=401, detail="Invalid or expired session")
+    
+    try:
+        payment_methods = login_manager.get_payment_methods(user_data["user_id"])
+        return {
+            "success": True,
+            "payment_methods": payment_methods
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get payment methods: {str(e)}")
+
+@app.post("/auth/payment-methods")
+async def add_payment_method(
+    request: AddPaymentMethodRequest,
+    authorization: Optional[str] = Header(None)
+):
+    """Add a payment method for the user"""
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing or invalid authorization header")
+    
+    token = authorization.replace("Bearer ", "")
+    is_valid, user_data = login_manager.verify_session(token)
+    
+    if not is_valid:
+        raise HTTPException(status_code=401, detail="Invalid or expired session")
+    
+    try:
+        success, message, payment_method_id = login_manager.add_payment_method(
+            user_id=user_data["user_id"],
+            card_number=request.card_number,
+            expiry_date=request.expiry_date,
+            cardholder_name=request.cardholder_name,
+            cvv=request.cvv,
+            billing_address=request.billing_address,
+            is_default=request.is_default or False
+        )
+        
+        if not success:
+            raise HTTPException(status_code=400, detail=message)
+        
+        return {
+            "success": True,
+            "message": message,
+            "payment_method_id": payment_method_id
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to add payment method: {str(e)}")
+
+@app.delete("/auth/payment-methods/{payment_method_id}")
+async def delete_payment_method(
+    payment_method_id: str,
+    authorization: Optional[str] = Header(None)
+):
+    """Delete a payment method"""
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing or invalid authorization header")
+    
+    token = authorization.replace("Bearer ", "")
+    is_valid, user_data = login_manager.verify_session(token)
+    
+    if not is_valid:
+        raise HTTPException(status_code=401, detail="Invalid or expired session")
+    
+    try:
+        success, message = login_manager.delete_payment_method(
+            user_id=user_data["user_id"],
+            payment_method_id=payment_method_id
+        )
+        
+        if not success:
+            raise HTTPException(status_code=400, detail=message)
+        
+        return {
+            "success": True,
+            "message": message
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to delete payment method: {str(e)}")
+
+@app.put("/auth/payment-methods/default")
+async def set_default_payment_method(
+    request: SetDefaultPaymentMethodRequest,
+    authorization: Optional[str] = Header(None)
+):
+    """Set a payment method as default"""
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing or invalid authorization header")
+    
+    token = authorization.replace("Bearer ", "")
+    is_valid, user_data = login_manager.verify_session(token)
+    
+    if not is_valid:
+        raise HTTPException(status_code=401, detail="Invalid or expired session")
+    
+    try:
+        success, message = login_manager.set_default_payment_method(
+            user_id=user_data["user_id"],
+            payment_method_id=request.payment_method_id
+        )
+        
+        if not success:
+            raise HTTPException(status_code=400, detail=message)
+        
+        return {
+            "success": True,
+            "message": message
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to set default payment method: {str(e)}")
+
+@app.get("/auth/payment-methods/check")
+async def check_payment_methods(authorization: Optional[str] = Header(None)):
+    """Check if user has payment methods"""
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing or invalid authorization header")
+    
+    token = authorization.replace("Bearer ", "")
+    is_valid, user_data = login_manager.verify_session(token)
+    
+    if not is_valid:
+        raise HTTPException(status_code=401, detail="Invalid or expired session")
+    
+    try:
+        has_methods = login_manager.has_payment_methods(user_data["user_id"])
+        return {
+            "success": True,
+            "has_payment_methods": has_methods
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to check payment methods: {str(e)}")
 
 @app.get("/health")
 async def health_check():
