@@ -746,17 +746,63 @@ async def handle_user_message(ctx: Context, sender: str, msg: ChatMessage):
     ctx.logger.info(f"Orchestrator's own address: {ctx.agent.address}")
     ctx.logger.info(f"Message ID: {msg.msg_id}")
     
+    # Check if message is stale (older than 5 minutes)
+    # Handle both timezone-aware and timezone-naive timestamps
+    try:
+        now = datetime.now(timezone.utc)
+        msg_time = msg.timestamp
+        
+        # If timestamp is naive, assume it's UTC
+        if msg_time.tzinfo is None:
+            msg_time = msg_time.replace(tzinfo=timezone.utc)
+        
+        message_age = (now - msg_time).total_seconds()
+        if message_age > 300:  # 5 minutes
+            ctx.logger.warning(f"Ignoring stale message (age: {message_age:.0f}s, ID: {msg.msg_id})")
+            return
+    except Exception as e:
+        ctx.logger.warning(f"Error checking message age: {e}, proceeding with message")
+    
     # Log message content
+    user_input_preview = ""
     for item in msg.content:
         if isinstance(item, TextContent):
-            ctx.logger.info(f"Message content preview: {item.text[:200]}...")
+            user_input_preview = item.text[:200]
+            ctx.logger.info(f"Message content preview: {user_input_preview}...")
             break
     
     # Check if this is from one of our target agents (shouldn't happen with send_and_receive, but handle just in case)
-    if sender in [INTENT_DISPATCHER_AGENT_ADDRESS, FUND_ALLOCATION_AGENT_ADDRESS, EVENTS_SCRAPER_AGENT_ADDRESS]:
-        ctx.logger.warning(f"Received unexpected message from target agent {sender[:20]}... This shouldn't happen with send_and_receive - message may be a late response or duplicate.")
-        # Don't process as user input - just log it
+    # These are late/duplicate responses that should be ignored
+    if sender in [INTENT_DISPATCHER_AGENT_ADDRESS, FUND_ALLOCATION_AGENT_ADDRESS, EVENTS_SCRAPER_AGENT_ADDRESS, BUDGET_FILTER_AGENT_ADDRESS]:
+        # Check if message is stale
+        try:
+            now = datetime.now(timezone.utc)
+            msg_time = msg.timestamp
+            if msg_time.tzinfo is None:
+                msg_time = msg_time.replace(tzinfo=timezone.utc)
+            message_age = (now - msg_time).total_seconds()
+            if message_age > 60:  # Older than 1 minute - definitely stale
+                ctx.logger.warning(f"Ignoring stale late response from target agent {sender[:20]}... (age: {message_age:.0f}s)")
+                return
+        except Exception:
+            pass
+        
+        ctx.logger.warning(f"Received unexpected message from target agent {sender[:20]}... This shouldn't happen with send_and_receive - message may be a late response or duplicate. Ignoring.")
+        # Don't process as user input - just ignore it
         return
+    
+    # Check for stale error messages - ignore error messages that look like they're from previous requests
+    if user_input_preview:
+        error_indicators = [
+            "Unable to parse input string into valid JSON",
+            "Previous request failed",
+            "type\": \"error\"",
+            "\"error\":",
+            "parse input string"  # This is the specific error from the terminal output
+        ]
+        if any(indicator in user_input_preview for indicator in error_indicators):
+            ctx.logger.warning(f"Ignoring stale error message: {user_input_preview[:100]}")
+            return
     
     # Otherwise, this is a user message - send acknowledgement
     try:
@@ -790,8 +836,20 @@ async def handle_user_message(ctx: Context, sender: str, msg: ChatMessage):
         end_time_from_json = None
         
         if parsed_json:
-            # Check if it's an error response
-            if parsed_json.get("error"):
+            # Check if it's an error response - ignore stale error messages
+            if parsed_json.get("error") or parsed_json.get("type") == "error":
+                error_message = parsed_json.get("error") or parsed_json.get("message", "")
+                # Check for specific stale error patterns
+                stale_error_patterns = [
+                    "Unable to parse input string into valid JSON",
+                    "parse input string",
+                    "Expected formats:",
+                    "EventScraperAgent:",
+                    "FundAllocationAgent:"
+                ]
+                if any(pattern in str(error_message) for pattern in stale_error_patterns):
+                    ctx.logger.warning(f"Ignoring stale error message: {error_message[:100]}")
+                    return
                 ctx.logger.warning(f"Received error as input, this might be a loop: {parsed_json}")
                 error_msg = create_text_chat(json.dumps({"type": "error", "message": "Previous request failed. Please try again with a new request."}))
                 await ctx.send(sender, error_msg)
@@ -816,6 +874,23 @@ async def handle_user_message(ctx: Context, sender: str, msg: ChatMessage):
         # Get conversation state from storage
         conversation_state_key = f"conversation_state_{sender}"
         conversation_state = ctx.storage.get(conversation_state_key)
+        
+        # Check if conversation state is stale (older than 10 minutes) and clear it
+        if conversation_state:
+            state_timestamp = conversation_state.get("timestamp")
+            if state_timestamp:
+                try:
+                    state_time = datetime.fromisoformat(state_timestamp.replace('Z', '+00:00'))
+                    state_age = (datetime.now(timezone.utc) - state_time).total_seconds()
+                    if state_age > 600:  # 10 minutes
+                        ctx.logger.info(f"Clearing stale conversation state (age: {state_age:.0f}s)")
+                        ctx.storage.set(conversation_state_key, None)
+                        conversation_state = None
+                except Exception as e:
+                    ctx.logger.warning(f"Error checking conversation state age: {e}")
+                    # If we can't parse the timestamp, clear it to be safe
+                    ctx.storage.set(conversation_state_key, None)
+                    conversation_state = None
         
         # Check if we're waiting for clarification from a previous vague request
         # Only use conversation_state data if:

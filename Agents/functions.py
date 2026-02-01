@@ -3,6 +3,7 @@ from typing import Optional, List, Dict
 import json
 import os
 import re
+from datetime import datetime, timezone
 from dotenv import load_dotenv
 from pymongo import MongoClient
 from openai import OpenAI
@@ -1036,7 +1037,8 @@ Examples:
                                     "budget": str(basic_info.get("budget", "null")),
                                     "start_time": basic_info.get("start_time", "null") or "null",
                                     "end_time": basic_info.get("end_time", "null") or "null",
-                                    "categories": categories
+                                    "categories": categories,
+                                    "timestamp": datetime.now(timezone.utc).isoformat()
                                 }
                             }
                         }
@@ -1064,7 +1066,8 @@ Examples:
                                     "budget": str(basic_info.get("budget", "null")),
                                     "start_time": basic_info.get("start_time", "null") or "null",
                                     "end_time": basic_info.get("end_time", "null") or "null",
-                                    "categories": categories
+                                    "categories": categories,
+                                    "timestamp": datetime.now(timezone.utc).isoformat()
                                 }
                             }
                         }

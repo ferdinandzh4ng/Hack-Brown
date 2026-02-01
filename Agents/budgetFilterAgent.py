@@ -76,7 +76,7 @@ import json
 import os
 from typing import List, Dict, Optional
 import re
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 from dotenv import load_dotenv
 from openai import OpenAI
@@ -463,59 +463,79 @@ Consider:
 
 
 def schedule_activities(venues: List[Dict], all_available_venues: Dict[str, List[Dict]], location: str, budget: float, total_cost: float, start_time: Optional[str] = None, end_time: Optional[str] = None) -> List[Dict]:
-    """Schedule activities with timing, transit, and add more if time permits"""
+    """Schedule activities with timing, transit, and pack multiple activities efficiently to fill time constraint"""
     if not venues:
         return []
     
     # Parse start and end times
     if start_time:
         try:
-            current_time = datetime.fromisoformat(start_time.replace('Z', '+00:00'))
+            start_datetime = datetime.fromisoformat(start_time.replace('Z', '+00:00'))
         except:
-            current_time = datetime.now().replace(hour=9, minute=0, second=0, microsecond=0)
+            start_datetime = datetime.now().replace(hour=9, minute=0, second=0, microsecond=0)
     else:
-        current_time = datetime.now().replace(hour=9, minute=0, second=0, microsecond=0)
+        start_datetime = datetime.now().replace(hour=9, minute=0, second=0, microsecond=0)
     
     if end_time:
         try:
             end_datetime = datetime.fromisoformat(end_time.replace('Z', '+00:00'))
         except:
-            end_datetime = current_time + timedelta(hours=12)  # Default 12 hours
+            end_datetime = start_datetime + timedelta(hours=12)  # Default 12 hours
     else:
-        end_datetime = current_time + timedelta(hours=12)
+        end_datetime = start_datetime + timedelta(hours=12)
+    
+    # Separate meals from other activities
+    meal_categories = {"breakfast", "brunch", "lunch", "dinner", "eat", "dining", "food"}
+    meals = []
+    other_activities = []
+    
+    for venue in venues:
+        venue_category = venue.get("category", "").lower()
+        if venue_category in meal_categories:
+            meals.append(venue)
+        else:
+            other_activities.append(venue)
+    
+    # Determine meal times based on time window
+    total_hours = (end_datetime - start_datetime).total_seconds() / 3600
+    start_hour = start_datetime.hour + start_datetime.minute / 60
+    
+    # Plan meal times (spaced out appropriately)
+    meal_times = []
+    if meals:
+        if total_hours >= 8:  # Full day - can fit 3 meals
+            if start_hour < 10:  # Early start
+                meal_times = [11.0, 14.0, 19.0]  # Brunch, Lunch, Dinner
+            elif start_hour < 12:  # Mid-morning start
+                meal_times = [12.0, 15.0, 19.0]  # Lunch, Late lunch, Dinner
+            else:  # Afternoon start
+                meal_times = [13.0, 18.0]  # Lunch, Dinner
+        elif total_hours >= 5:  # Half day - can fit 2 meals
+            if start_hour < 11:
+                meal_times = [11.5, 15.0]  # Brunch, Late lunch
+            else:
+                meal_times = [13.0, 18.0]  # Lunch, Dinner
+        else:  # Short window - 1 meal
+            meal_times = [start_hour + total_hours / 2]  # Middle of window
+    
+    # Sort meals by type (breakfast/brunch first, then lunch, then dinner)
+    meal_order = {"breakfast": 1, "brunch": 1, "lunch": 2, "dinner": 3, "eat": 2}
+    meals.sort(key=lambda v: meal_order.get(v.get("category", "").lower(), 99))
     
     scheduled = []
-    last_category = None
-    scheduled_categories = set()
-    meal_count = 0
+    current_time = start_datetime
+    scheduled_venue_names = set()
     
-    # Sort venues: meals first (breakfast, lunch, dinner), then other activities
-    meal_order = {"breakfast": 1, "brunch": 1, "lunch": 2, "dinner": 3, "eat": 2}
-    sorted_venues = sorted(venues, key=lambda v: (
-        meal_order.get(v.get("category", ""), 99),
-        v.get("name", "")
-    ))
-    
-    for i, venue in enumerate(sorted_venues):
-        venue_name = venue.get("name", "")
-        venue_category = venue.get("category", "").lower()
-        venue_cost = venue.get("cost", 0)
-        venue_address = venue.get("address", "")
-        duration_str = venue.get("duration", "1 hour")
-        duration_minutes = parse_duration(duration_str)
-        
-        # Add transit from previous venue if not first
-        if i > 0 and scheduled:
-            prev_venue = scheduled[-1]
-            prev_address = prev_venue.get("address", "")
+    # Helper function to add transit
+    def add_transit_if_needed(prev_address: str, next_address: str, next_venue_name: str) -> bool:
+        nonlocal current_time, total_cost
+        if prev_address and next_address and prev_address != next_address:
+            transit_info = research_transit(prev_address, next_address, location)
+            transit_duration = transit_info.get("duration_minutes", 15)
+            transit_cost = transit_info.get("cost_usd", 0.0)
+            transit_method = transit_info.get("method", "walking")
             
-            if prev_address and venue_address:
-                transit_info = research_transit(prev_address, venue_address, location)
-                transit_duration = transit_info.get("duration_minutes", 15)
-                transit_cost = transit_info.get("cost_usd", 0.0)
-                transit_method = transit_info.get("method", "walking")
-                
-                # Add transit as an activity
+            if (current_time + timedelta(minutes=transit_duration)) <= end_datetime:
                 transit_activity = {
                     "type": "transit",
                     "venue": f"Travel via {transit_method}",
@@ -524,129 +544,331 @@ def schedule_activities(venues: List[Dict], all_available_venues: Dict[str, List
                     "end_time": (current_time + timedelta(minutes=transit_duration)).isoformat(),
                     "duration_minutes": transit_duration,
                     "cost": transit_cost,
-                    "description": transit_info.get("description", f"Travel from {prev_venue.get('venue', 'previous location')} to {venue_name}"),
+                    "description": transit_info.get("description", f"Travel to {next_venue_name}"),
                     "method": transit_method,
-                    "address": venue_address  # Destination address
+                    "address": next_address
                 }
                 scheduled.append(transit_activity)
                 current_time += timedelta(minutes=transit_duration)
                 total_cost += transit_cost
-        
-        # Check if we have time for this activity
-        activity_end = current_time + timedelta(minutes=duration_minutes)
-        if activity_end > end_datetime:
-            break  # No more time
-        
-        # Skip if same category as last (especially for meals)
-        if last_category == venue_category and venue_category in ["eat", "dining", "food"]:
-            continue
-        
-        # Add the activity
-        activity = {
-            "type": "venue",
-            "venue": venue_name,
-            "category": venue_category,
-            "start_time": current_time.isoformat(),
-            "end_time": activity_end.isoformat(),
-            "duration_minutes": duration_minutes,
-            "cost": venue_cost,
-            "description": venue.get("description", ""),
-            "address": venue_address,
-            "phone": venue.get("phone"),
-            "url": venue.get("url")
-        }
-        scheduled.append(activity)
-        current_time = activity_end
-        total_cost += venue_cost
-        last_category = venue_category
-        scheduled_categories.add(venue_category)
-        if venue_category in ["eat", "dining", "food"]:
-            meal_count += 1
+                return True
+        return False
     
-    # If there's still time and budget, try to add more activities
-    remaining_time = (end_datetime - current_time).total_seconds() / 60  # minutes
+    # Schedule meals at appropriate times
+    meal_index = 0
+    for meal_time in meal_times:
+        if meal_index >= len(meals):
+            break
+        
+        # Calculate target time for this meal
+        target_time = start_datetime.replace(hour=int(meal_time), minute=int((meal_time % 1) * 60), second=0, microsecond=0)
+        if target_time < current_time:
+            target_time = current_time
+        if target_time >= end_datetime:
+            break
+        
+        meal = meals[meal_index]
+        meal_name = meal.get("name", "")
+        meal_category = meal.get("category", "").lower()
+        meal_cost = meal.get("cost", 0)
+        meal_address = meal.get("address", "")
+        meal_duration = parse_duration(meal.get("duration", "1 hour"))
+        
+        # If we're before the target time, fill with other activities
+        # Reserve budget for this meal and remaining meals
+        remaining_meals_cost = sum(m.get("cost", 0) for m in meals[meal_index:])
+        available_budget = budget - total_cost - remaining_meals_cost
+        
+        # Also try to pull from all_available_venues to fill gaps before meals
+        all_activities_pool = list(other_activities)
+        for cat, venue_list in all_available_venues.items():
+            for venue in venue_list:
+                if venue.get("name") not in scheduled_venue_names:
+                    # Only add non-meal activities
+                    venue_category = venue.get("category", "").lower()
+                    if venue_category not in meal_categories:
+                        all_activities_pool.append(venue)
+        
+        while current_time < target_time and all_activities_pool and available_budget > 0:
+            # Try to pack multiple activities before the meal
+            time_until_meal = (target_time - current_time).total_seconds() / 60
+            
+            # Find activities that fit in this gap
+            activities_to_add = []
+            temp_time = current_time
+            temp_cost = total_cost
+            prev_addr = scheduled[-1].get("address", "") if scheduled else ""
+            
+            for activity in all_activities_pool[:]:  # Copy list to iterate safely
+                if activity.get("name") in scheduled_venue_names:
+                    continue
+                
+                act_name = activity.get("name", "")
+                act_address = activity.get("address", "")
+                act_duration = parse_duration(activity.get("duration", "1 hour"))
+                act_cost = activity.get("cost", 0)
+                
+                # Estimate transit time
+                transit_time = 15 if prev_addr and act_address and prev_addr != act_address else 0
+                total_needed = transit_time + act_duration
+                
+                # Check budget including reserved meal costs
+                if (temp_time + timedelta(minutes=total_needed)) <= target_time and (temp_cost + act_cost) <= (budget - remaining_meals_cost):
+                    activities_to_add.append((activity, transit_time))
+                    temp_time += timedelta(minutes=total_needed)
+                    temp_cost += act_cost
+                    prev_addr = act_address
+                elif len(activities_to_add) > 0:
+                    break  # Can't fit more, but we have some
+            
+            if not activities_to_add:
+                break  # Can't fit any activities before this meal
+            
+            # Add the activities we found
+            for activity, transit_time in activities_to_add:
+                act_name = activity.get("name", "")
+                act_address = activity.get("address", "")
+                act_duration = parse_duration(activity.get("duration", "1 hour"))
+                act_cost = activity.get("cost", 0)
+                
+                # Add transit
+                if scheduled:
+                    prev_venue = scheduled[-1]
+                    prev_addr = prev_venue.get("address", "")
+                    add_transit_if_needed(prev_addr, act_address, act_name)
+                
+                # Add activity
+                activity_end = current_time + timedelta(minutes=act_duration)
+                if activity_end <= end_datetime:
+                    activity_obj = {
+                        "type": "venue",
+                        "venue": act_name,
+                        "category": activity.get("category", "").lower(),
+                        "start_time": current_time.isoformat(),
+                        "end_time": activity_end.isoformat(),
+                        "duration_minutes": act_duration,
+                        "cost": act_cost,
+                        "description": activity.get("description", ""),
+                        "address": act_address,
+                        "phone": activity.get("phone"),
+                        "url": activity.get("url")
+                    }
+                    scheduled.append(activity_obj)
+                    current_time = activity_end
+                    total_cost += act_cost
+                    scheduled_venue_names.add(act_name)
+                    # Remove from both lists if present
+                    if activity in other_activities:
+                        other_activities.remove(activity)
+                    if activity in all_activities_pool:
+                        all_activities_pool.remove(activity)
+            
+            # Update available budget after adding activities
+            remaining_meals_cost = sum(m.get("cost", 0) for m in meals[meal_index:])
+            available_budget = budget - total_cost - remaining_meals_cost
+        
+        # Now schedule the meal
+        if current_time < target_time:
+            current_time = target_time
+        
+        # Add transit to meal if needed
+        if scheduled:
+            prev_venue = scheduled[-1]
+            prev_addr = prev_venue.get("address", "")
+            add_transit_if_needed(prev_addr, meal_address, meal_name)
+        
+        # Schedule meal
+        meal_end = current_time + timedelta(minutes=meal_duration)
+        if meal_end <= end_datetime and (total_cost + meal_cost) <= budget:
+            meal_activity = {
+                "type": "venue",
+                "venue": meal_name,
+                "category": meal_category,
+                "start_time": current_time.isoformat(),
+                "end_time": meal_end.isoformat(),
+                "duration_minutes": meal_duration,
+                "cost": meal_cost,
+                "description": meal.get("description", ""),
+                "address": meal_address,
+                "phone": meal.get("phone"),
+                "url": meal.get("url")
+            }
+            scheduled.append(meal_activity)
+            current_time = meal_end
+            total_cost += meal_cost
+            scheduled_venue_names.add(meal_name)
+            meal_index += 1
+    
+    # Fill remaining time with other activities (pack multiple when possible)
+    # Be very aggressive about filling the time window - continue until we're within 10 minutes of end time
+    remaining_time = (end_datetime - current_time).total_seconds() / 60
     remaining_budget = budget - total_cost
     
-    if remaining_time > 60 and remaining_budget > 20:  # More than 1 hour and $20 left
-        # Look for additional entertainment or sightseeing activities
-        # Prioritize entertainment (can have multiple) and sightseeing
-        additional_categories = ["entertainment", "sightsee", "sightseeing", "cultural", "shop"]
+    # Sort other activities by duration (shorter first to pack more)
+    other_activities.sort(key=lambda v: parse_duration(v.get("duration", "1 hour")))
+    
+    # First, use up all activities from the original list
+    while remaining_time > 10 and remaining_budget > 5 and other_activities:
+        # Try to pack multiple activities in remaining time
+        activities_to_add = []
+        temp_time = current_time
+        temp_cost = total_cost
+        prev_addr = scheduled[-1].get("address", "") if scheduled else ""
         
+        for activity in other_activities[:]:
+            if activity.get("name") in scheduled_venue_names:
+                continue
+            
+            act_name = activity.get("name", "")
+            act_address = activity.get("address", "")
+            act_duration = parse_duration(activity.get("duration", "1 hour"))
+            act_cost = activity.get("cost", 0)
+            
+            # Estimate transit
+            transit_time = 15 if prev_addr and act_address and prev_addr != act_address else 0
+            total_needed = transit_time + act_duration
+            
+            if (temp_time + timedelta(minutes=total_needed)) <= end_datetime and (temp_cost + act_cost) <= budget:
+                activities_to_add.append((activity, transit_time))
+                temp_time += timedelta(minutes=total_needed)
+                temp_cost += act_cost
+                prev_addr = act_address
+            else:
+                break  # Can't fit more
+        
+        if not activities_to_add:
+            break  # Can't fit any more activities
+        
+        # Add the activities
+        for activity, transit_time in activities_to_add:
+            act_name = activity.get("name", "")
+            act_address = activity.get("address", "")
+            act_duration = parse_duration(activity.get("duration", "1 hour"))
+            act_cost = activity.get("cost", 0)
+            
+            # Add transit
+            if scheduled:
+                prev_venue = scheduled[-1]
+                prev_addr = prev_venue.get("address", "")
+                add_transit_if_needed(prev_addr, act_address, act_name)
+            
+            # Add activity
+            activity_end = current_time + timedelta(minutes=act_duration)
+            if activity_end <= end_datetime:
+                activity_obj = {
+                    "type": "venue",
+                    "venue": act_name,
+                    "category": activity.get("category", "").lower(),
+                    "start_time": current_time.isoformat(),
+                    "end_time": activity_end.isoformat(),
+                    "duration_minutes": act_duration,
+                    "cost": act_cost,
+                    "description": activity.get("description", ""),
+                    "address": act_address,
+                    "phone": activity.get("phone"),
+                    "url": activity.get("url")
+                }
+                scheduled.append(activity_obj)
+                current_time = activity_end
+                total_cost += act_cost
+                scheduled_venue_names.add(act_name)
+                other_activities.remove(activity)
+        
+        remaining_time = (end_datetime - current_time).total_seconds() / 60
+        remaining_budget = budget - total_cost
+    
+    # Aggressively fill remaining time from all_available_venues
+    # Keep looping through categories until we can't fit any more activities
+    max_iterations = 10  # Prevent infinite loops
+    iteration = 0
+    added_any = True
+    
+    while remaining_time > 10 and remaining_budget > 5 and added_any and iteration < max_iterations:
+        iteration += 1
+        added_any = False
+        remaining_time = (end_datetime - current_time).total_seconds() / 60
+        remaining_budget = budget - total_cost
+        
+        additional_categories = ["entertainment", "sightsee", "sightseeing", "cultural", "shop", "outdoor", "relax", "museum", "park", "gallery"]
+        
+        # Try to pack multiple activities from available venues
         for category in additional_categories:
-            if remaining_time <= 30:  # Less than 30 min left
+            if remaining_time <= 10:
                 break
             
-            # Get available venues for this category
             available_for_category = []
             for cat, venue_list in all_available_venues.items():
                 if match_venue_to_category(cat, category):
                     available_for_category.extend(venue_list)
             
-            # Find a venue that fits time and budget
+            # Sort by duration (shorter first) and cost (cheaper first)
+            available_for_category.sort(key=lambda v: (
+                parse_duration(v.get("duration", "1 hour")),
+                v.get("cost", 0)
+            ))
+            
+            # Try to pack multiple activities from this category
+            activities_to_add = []
+            temp_time = current_time
+            temp_cost = total_cost
+            prev_addr = scheduled[-1].get("address", "") if scheduled else ""
+            
             for venue in available_for_category:
-                # Skip if already scheduled
-                if any(v.get("venue") == venue.get("name") for v in scheduled if v.get("type") == "venue"):
+                if venue.get("name") in scheduled_venue_names:
                     continue
                 
                 venue_name = venue.get("name", "")
                 venue_cost = venue.get("cost", 0)
                 venue_address = venue.get("address", "")
-                duration_str = venue.get("duration", "1 hour")
-                duration_minutes = parse_duration(duration_str)
+                venue_duration = parse_duration(venue.get("duration", "1 hour"))
                 
-                # Check if it fits time and budget
-                if venue_cost <= remaining_budget and duration_minutes <= remaining_time:
-                    # Add transit if needed
-                    if scheduled:
-                        prev_venue = scheduled[-1]
-                        prev_address = prev_venue.get("address", "")
-                        
-                        if prev_address and venue_address:
-                            transit_info = research_transit(prev_address, venue_address, location)
-                            transit_duration = transit_info.get("duration_minutes", 15)
-                            transit_cost = transit_info.get("cost_usd", 0.0)
-                            transit_method = transit_info.get("method", "walking")
-                            
-                            if (current_time + timedelta(minutes=transit_duration + duration_minutes)) <= end_datetime and (total_cost + transit_cost + venue_cost) <= budget:
-                                # Add transit
-                                transit_activity = {
-                                    "type": "transit",
-                                    "venue": f"Travel via {transit_method}",
-                                    "category": "transit",
-                                    "start_time": current_time.isoformat(),
-                                    "end_time": (current_time + timedelta(minutes=transit_duration)).isoformat(),
-                                    "duration_minutes": transit_duration,
-                                    "cost": transit_cost,
-                                    "description": transit_info.get("description", f"Travel to {venue_name}"),
-                                    "method": transit_method,
-                                    "address": venue_address
-                                }
-                                scheduled.append(transit_activity)
-                                current_time += timedelta(minutes=transit_duration)
-                                total_cost += transit_cost
-                    
-                    # Add the activity
-                    activity_end = current_time + timedelta(minutes=duration_minutes)
-                    if activity_end <= end_datetime:
-                        activity = {
-                            "type": "venue",
-                            "venue": venue_name,
-                            "category": venue.get("category", "").lower(),
-                            "start_time": current_time.isoformat(),
-                            "end_time": activity_end.isoformat(),
-                            "duration_minutes": duration_minutes,
-                            "cost": venue_cost,
-                            "description": venue.get("description", ""),
-                            "address": venue_address,
-                            "phone": venue.get("phone"),
-                            "url": venue.get("url")
-                        }
-                        scheduled.append(activity)
-                        current_time = activity_end
-                        total_cost += venue_cost
-                        remaining_time = (end_datetime - current_time).total_seconds() / 60
-                        remaining_budget = budget - total_cost
-                        break  # Added one, move to next category
+                transit_time = 15 if prev_addr and venue_address and prev_addr != venue_address else 0
+                total_needed = transit_time + venue_duration
+                
+                if (temp_time + timedelta(minutes=total_needed)) <= end_datetime and (temp_cost + venue_cost) <= budget:
+                    activities_to_add.append((venue, transit_time))
+                    temp_time += timedelta(minutes=total_needed)
+                    temp_cost += venue_cost
+                    prev_addr = venue_address
+                else:
+                    break  # Can't fit more from this category
+            
+            # Add all activities we found for this category
+            for venue, transit_time in activities_to_add:
+                venue_name = venue.get("name", "")
+                venue_cost = venue.get("cost", 0)
+                venue_address = venue.get("address", "")
+                venue_duration = parse_duration(venue.get("duration", "1 hour"))
+                
+                # Add transit
+                if scheduled:
+                    prev_venue = scheduled[-1]
+                    prev_addr = prev_venue.get("address", "")
+                    add_transit_if_needed(prev_addr, venue_address, venue_name)
+                
+                # Add activity
+                activity_end = current_time + timedelta(minutes=venue_duration)
+                if activity_end <= end_datetime:
+                    activity_obj = {
+                        "type": "venue",
+                        "venue": venue_name,
+                        "category": venue.get("category", "").lower(),
+                        "start_time": current_time.isoformat(),
+                        "end_time": activity_end.isoformat(),
+                        "duration_minutes": venue_duration,
+                        "cost": venue_cost,
+                        "description": venue.get("description", ""),
+                        "address": venue_address,
+                        "phone": venue.get("phone"),
+                        "url": venue.get("url")
+                    }
+                    scheduled.append(activity_obj)
+                    current_time = activity_end
+                    total_cost += venue_cost
+                    scheduled_venue_names.add(venue_name)
+                    added_any = True
+                    remaining_time = (end_datetime - current_time).total_seconds() / 60
+                    remaining_budget = budget - total_cost
     
     return scheduled
 
@@ -872,12 +1094,43 @@ if UA_PRESENT:
         
         Returns filtered_output with activities matching interests and budget constraints.
         """
+        # Check if message is stale (older than 5 minutes)
+        try:
+            now = datetime.now(timezone.utc)
+            msg_time = msg.timestamp
+            
+            # If timestamp is naive, assume it's UTC
+            if msg_time.tzinfo is None:
+                msg_time = msg_time.replace(tzinfo=timezone.utc)
+            
+            message_age = (now - msg_time).total_seconds()
+            if message_age > 300:  # 5 minutes
+                ctx.logger.warning(f"Ignoring stale message (age: {message_age:.0f}s, ID: {msg.msg_id})")
+                return
+        except Exception as e:
+            ctx.logger.warning(f"Error checking message age: {e}, proceeding with message")
+        
         # NOTE: Not sending ChatAcknowledgement to avoid interfering with ctx.send_and_receive
         # The orchestrator uses send_and_receive which can match acknowledgements instead of actual responses
 
         try:
             for item in msg.content:
                 if isinstance(item, TextContent):
+                    # Check for error messages in the text before parsing
+                    text_preview = item.text[:200] if len(item.text) > 200 else item.text
+                    error_indicators = [
+                        "parse input string into valid JSON",
+                        "Unable to parse input string",
+                        '"type": "error"',
+                        '"error":',
+                        "Expected formats:",
+                        "EventScraperAgent:",
+                        "FundAllocationAgent:"
+                    ]
+                    if any(indicator in item.text for indicator in error_indicators):
+                        ctx.logger.warning(f"Ignoring error message: {text_preview}")
+                        return
+                    
                     # Expect JSON string from Agentverse
                     try:
                         parsed = parse_text_to_json(item.text)
@@ -889,7 +1142,7 @@ if UA_PRESENT:
                             "hint": "Send JSON from EventScraperAgent or FundAllocationAgent"
                         }
                         response_msg = ChatMessage(
-                            timestamp=datetime.utcnow(), 
+                            timestamp=datetime.now(timezone.utc), 
                             msg_id=uuid4(), 
                             content=[TextContent(type="text", text=json.dumps(err))]
                         )
@@ -897,8 +1150,25 @@ if UA_PRESENT:
                         ctx.logger.error(f"Parse error: {ve}")
                         return
 
+                    # Check if parsed data contains error messages
+                    if parsed.get("type") == "error" or parsed.get("error"):
+                        error_msg = parsed.get("message") or parsed.get("error", "")
+                        ctx.logger.warning(f"Ignoring error response: {error_msg[:100]}")
+                        return
+                    
                     events = parsed.get("events") or parsed.get("events_scraper") or {}
                     fund = parsed.get("fund") or parsed.get("fund_allocation") or {}
+                    
+                    # Validate location - reject invalid locations like error messages
+                    location = None
+                    if events:
+                        location = events.get("location", "")
+                    elif fund:
+                        location = fund.get("location", "")
+                    
+                    if location and ("parse input string" in str(location).lower() or "error" in str(location).lower() or len(str(location)) < 2):
+                        ctx.logger.warning(f"Rejecting message with invalid location: {location}")
+                        return
 
                     if not events and not fund:
                         err = {
@@ -911,7 +1181,7 @@ if UA_PRESENT:
                             ]
                         }
                         response_msg = ChatMessage(
-                            timestamp=datetime.utcnow(), 
+                            timestamp=datetime.now(timezone.utc), 
                             msg_id=uuid4(), 
                             content=[TextContent(type="text", text=json.dumps(err))]
                         )
