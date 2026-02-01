@@ -16,9 +16,12 @@
     "original_message_2071101f-0386-4671-a77a-530c090f350d": "Plan me a day in Toronto",
     "b59698e6-ee6d-40a8-be1d-6493aff3d01d": "agent1qfsuxw6yaz223jppu974lf2kyuznqeruvy3rnu0pw3m6acmtmxmq7c5yz7k",
     "original_message_b59698e6-ee6d-40a8-be1d-6493aff3d01d": "Eat, sightsee and shop",
-    "conversation_state_agent1qfsuxw6yaz223jppu974lf2kyuznqeruvy3rnu0pw3m6acmtmxmq7c5yz7k": {
+    "conversation_state_agent1qfsuxw6yaz223jppu974lf2kyuznqeruvy3rnu0pw3m6acmtmxmq7c5yz7k": null,
+    "a3a54cd7-2faf-470c-b822-cc7ad1b4457e": "agent1qg2akmff6ke58spye465yje4e5fvdk6faku59h2akjjtu5hmkf8rqy346qj",
+    "original_message_a3a54cd7-2faf-470c-b822-cc7ad1b4457e": "@llgorchgoat Plan me a day in Toronto from 10 am to 7pm where I can eat, sightsee and shop all day. ",
+    "conversation_state_agent1qwtxjkmuvs7qrtwx8jj3mtd8af5th5ayfmdyws9mzxcfwa666n3vkkdanz6": {
         "waiting_for_clarification": true,
-        "original_request": "Plan a day itinerary in Toronto",
+        "original_request": "Plan a night out in Toronto",
         "location": "Toronto",
         "budget": "None",
         "start_time": "null",
@@ -79,5 +82,33 @@
                 ]
             }
         ]
-    }
+    },
+    "a5e88585-8625-40b2-b381-25abf7eb9f4c": "agent1qfsuxw6yaz223jppu974lf2kyuznqeruvy3rnu0pw3m6acmtmxmq7c5yz7k",
+    "original_message_a5e88585-8625-40b2-b381-25abf7eb9f4c": "plan me a night out in toronto where i can eat sightsee and shop from 5pm to 10pm",
+    "7b1afac8-de5b-49d0-9250-2a6d65ad2090": "agent1qg2akmff6ke58spye465yje4e5fvdk6faku59h2akjjtu5hmkf8rqy346qj",
+    "original_message_7b1afac8-de5b-49d0-9250-2a6d65ad2090": "Error processing request: 'NoneType' object has no attribute 'get'",
+    "conversation_state_agent1qg2akmff6ke58spye465yje4e5fvdk6faku59h2akjjtu5hmkf8rqy346qj": null,
+    "4705db20-bff8-42c6-b511-11dec513c41a": "agent1qg2akmff6ke58spye465yje4e5fvdk6faku59h2akjjtu5hmkf8rqy346qj",
+    "original_message_4705db20-bff8-42c6-b511-11dec513c41a": "{\n  \"type\": \"error\",\n  \"message\": null\n}",
+    "d56cfd37-fff1-487b-84e2-d385ce63ff3c": "agent1qg2akmff6ke58spye465yje4e5fvdk6faku59h2akjjtu5hmkf8rqy346qj",
+    "original_message_d56cfd37-fff1-487b-84e2-d385ce63ff3c": "{\n  \"activity_list\": [\n    \"eat\"\n  ],\n  \"constraints\": {\n    \"budget\": null,\n    \"start_time\": null,\n    \"end_time\": null,\n    \"location\": \"address or respond to\",\n    \"preferences\": [\n      \"find a dinner reservation for tonight\"\n    ]\n  },\n  \"agents_to_call\": [],\n  \"notes\": \"User requested a dinner reservation for tonight, so 'eat' is the primary activity. No other specific activities were mentioned.\"\n}",
+    "e313413a-dfb0-4e4a-85a3-a3a7c2ab00f6": "agent1qg2akmff6ke58spye465yje4e5fvdk6faku59h2akjjtu5hmkf8rqy346qj",
+    "original_message_e313413a-dfb0-4e4a-85a3-a3a7c2ab00f6": "To help plan your trip, please select which types of activities interest you:\n\n1. EAT: Dining and food experiences\n   Examples: local cuisine, restaurants, cafes\n2. SIGHTSEE: Sightseeing and landmarks\n   Examples: monuments, museums, parks\n3. SHOP: Shopping and markets\n   Examples: local markets, boutiques, souvenirs\n4. ENTERTAINMENT: Entertainment and nightlife\n   Examples: shows, concerts, bars\n5. OUTDOOR: Outdoor activities\n   Examples: parks, hiking, beaches\n6. CULTURAL: Cultural experiences\n   Examples: museums, galleries, historic sites\n\nPlease reply with the numbers or names of categories you're interested in (e.g., '1, 3, 5' or 'eat, sightsee').",
+    "b71fc7c1-7aa3-41af-8af7-42974dc32f5d": "agent1qg2akmff6ke58spye465yje4e5fvdk6faku59h2akjjtu5hmkf8rqy346qj",
+    "original_message_b71fc7c1-7aa3-41af-8af7-42974dc32f5d": "Make me a plan for a night in Toronto. I have a budget of $500 and i want to eat, sightsee, and shop. I want to be out at 5pm and come home at 11pm.",
+    "last_sender_b71fc7c1-7aa3-41af-8af7-42974dc32f5d": "agent1qg2akmff6ke58spye465yje4e5fvdk6faku59h2akjjtu5hmkf8rqy346qj",
+    "last_sender_a3a54cd7-2faf-470c-b822-cc7ad1b4457e": "agent1qg2akmff6ke58spye465yje4e5fvdk6faku59h2akjjtu5hmkf8rqy346qj",
+    "3690a71f-2546-4194-b9bd-14e990d40e42": "agent1qg2akmff6ke58spye465yje4e5fvdk6faku59h2akjjtu5hmkf8rqy346qj",
+    "last_sender_3690a71f-2546-4194-b9bd-14e990d40e42": "agent1qg2akmff6ke58spye465yje4e5fvdk6faku59h2akjjtu5hmkf8rqy346qj",
+    "original_message_3690a71f-2546-4194-b9bd-14e990d40e42": "To help plan your trip, please select which types of activities interest you:\n\n1. EAT: Dining and food experiences\n   Examples: local cuisine, restaurants, cafes\n2. SIGHTSEE: Sightseeing and landmarks\n   Examples: monuments, museums, parks\n3. SHOP: Shopping and markets\n   Examples: local markets, boutiques, souvenirs\n4. ENTERTAINMENT: Entertainment and nightlife\n   Examples: shows, concerts, bars\n5. OUTDOOR: Outdoor activities\n   Examples: parks, hiking, beaches\n6. CULTURAL: Cultural experiences\n   Examples: museums, galleries, historic sites\n\nPlease reply with the numbers or names of categories you're interested in (e.g., '1, 3, 5' or 'eat, sightsee').",
+    "7484ff15-53e9-417f-b08d-7a4b46e29455": "agent1qg2akmff6ke58spye465yje4e5fvdk6faku59h2akjjtu5hmkf8rqy346qj",
+    "last_sender_7484ff15-53e9-417f-b08d-7a4b46e29455": "agent1qg2akmff6ke58spye465yje4e5fvdk6faku59h2akjjtu5hmkf8rqy346qj",
+    "original_message_7484ff15-53e9-417f-b08d-7a4b46e29455": "Make me a plan for a night in Toronto. I have a budget of $500 and i want to eat, sightsee, and shop. I want to be out at 5pm and come home at 11pm.",
+    "dc2ec657-c788-492b-b431-5f87e4b5f024": "agent1qg2akmff6ke58spye465yje4e5fvdk6faku59h2akjjtu5hmkf8rqy346qj",
+    "last_sender_dc2ec657-c788-492b-b431-5f87e4b5f024": "agent1qg2akmff6ke58spye465yje4e5fvdk6faku59h2akjjtu5hmkf8rqy346qj",
+    "original_message_dc2ec657-c788-492b-b431-5f87e4b5f024": "Plan me a day in Toronto from 10 am to 7pm where I can eat, sightsee and shop all day. I have a budget of 500$",
+    "extracted_start_time_a3a54cd7-2faf-470c-b822-cc7ad1b4457e": "10am",
+    "extracted_end_time_a3a54cd7-2faf-470c-b822-cc7ad1b4457e": "7pm",
+    "extracted_start_time_dc2ec657-c788-492b-b431-5f87e4b5f024": "10am",
+    "extracted_end_time_dc2ec657-c788-492b-b431-5f87e4b5f024": "7pm"
 }

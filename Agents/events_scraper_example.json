@@ -1,0 +1,11 @@
+{
+  "location": "New York City",
+  "timeframe": "weekend",
+  "budget": 500.0,
+  "interest_activities": [
+    "sightseeing",
+    "dining",
+    "entertainment"
+  ]
+}
+

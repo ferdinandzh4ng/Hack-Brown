@@ -1,0 +1,799 @@
+"""
+LangGraph Orchestrator Agent - Coordinates workflow using LangGraph
+Takes user input, dispatches intent, and coordinates parallel agent calls
+"""
+from uagents import Agent, Context, Protocol, Model
+from uagents_core.contrib.protocols.chat import (
+    ChatMessage,
+    TextContent,
+    chat_protocol_spec,
+    ChatAcknowledgement,
+)
+from typing import Optional, List, Dict, Any, TypedDict, Annotated
+from datetime import datetime, timezone
+from uuid import uuid4
+import json
+import os
+import asyncio
+import re
+from dotenv import load_dotenv
+from langgraph.graph import StateGraph, END
+
+load_dotenv()
+
+# ============================================================
+# Models
+# ============================================================
+
+class IntentDispatcherResponse(Model):
+    """Response model from intent dispatcher agent - matches ChatMessage format"""
+    pass  # We'll use ChatMessage directly
+
+class FundAllocationResponse(Model):
+    """Response model from fund allocation agent - matches ChatMessage format"""
+    pass  # We'll use ChatMessage directly
+
+class EventsScraperResponse(Model):
+    """Response model from events scraper agent - matches ChatMessage format"""
+    pass  # We'll use ChatMessage directly
+
+class OrchestratorState(TypedDict):
+    """State for LangGraph workflow"""
+    user_input: str
+    sender: str
+    conversation_state: Optional[Dict]
+    dispatch_result: Optional[Dict]
+    dispatch_plan: Optional[Dict]
+    activities: List[str]
+    location: str
+    budget: float
+    timeframe: str
+    start_time: Optional[str]  # ISO 8601 datetime string
+    end_time: Optional[str]  # ISO 8601 datetime string
+    fund_allocation_response: Optional[Dict]
+    events_scraper_response: Optional[Dict]
+    final_output: Optional[Dict]
+    error: Optional[str]
+
+# ============================================================
+# Agent Setup
+# ============================================================
+
+agent = Agent(
+    name="LangGraphOrchestrator",
+    seed=os.getenv("ORCHESTRATOR_AGENT_SEED", "langgraph-orchestrator-seed"),
+    port=8004,
+    mailbox=True,
+    publish_agent_details=True,
+    network="testnet"
+)
+
+chat_proto = Protocol(spec=chat_protocol_spec)
+
+# ============================================================
+# Agent Addresses (configure these with your actual agent addresses)
+# ============================================================
+
+INTENT_DISPATCHER_AGENT_ADDRESS = os.getenv(
+    "INTENT_DISPATCHER_AGENT_ADDRESS",
+    "agent1q2943p8ja20slch8hkgnrvwscvuasnxfre0dfhzhlf744lvrpuhqurty7j4"  # Replace with actual intent dispatcher agent address (agents.py)
+)
+
+FUND_ALLOCATION_AGENT_ADDRESS = os.getenv(
+    "FUND_ALLOCATION_AGENT_ADDRESS",
+    "agent1qwl6edrzmwsls5vvslkrmfh2xkg7ur88gu4k7gqtv4xa47sczv63vvj3l0z"  # Replace with actual fundAllocationAgent address
+)
+
+EVENTS_SCRAPER_AGENT_ADDRESS = os.getenv(
+    "EVENTS_SCRAPER_AGENT_ADDRESS",
+    "agent1q0ngan90nxrwqs27uj6q7scr2fv2ddsx42kvvkkqkv5rgunzwndeguyx9cy"  # Replace with actual eventsScraperAgent address
+)
+
+# No longer needed - using send_and_receive instead of manual future handling
+# _pending_responses: Dict[str, asyncio.Future] = {}
+
+# ============================================================
+# Helper Functions
+# ============================================================
+
+def remove_agent_ids(text: str) -> str:
+    """
+    Remove agent IDs from text in various formats.
+    
+    Args:
+        text: Input text that may contain agent IDs
+        
+    Returns:
+        str: Cleaned text with agent IDs removed
+    """
+    if not text or not isinstance(text, str):
+        return text
+    
+    cleaned_text = text.strip()
+    
+    # Remove @agent mentions with alphanumeric IDs
+    cleaned_text = re.sub(r'@agent[a-zA-Z0-9]+', '', cleaned_text)
+    
+    # Remove standalone agent addresses (agent1q followed by alphanumeric)
+    cleaned_text = re.sub(r'\bagent1q[a-zA-Z0-9]+\b', '', cleaned_text)
+    
+    # Remove any remaining agent mentions
+    cleaned_text = re.sub(r'\bagent\s*\d+[a-zA-Z0-9]*\b', '', cleaned_text, flags=re.IGNORECASE)
+    
+    # Clean up extra whitespace and newlines
+    cleaned_text = re.sub(r'\s+', ' ', cleaned_text).strip()
+    
+    # Remove leading/trailing punctuation that might be left after agent ID removal
+    cleaned_text = re.sub(r'^[,\s]+|[,\s]+$', '', cleaned_text)
+    
+    return cleaned_text if cleaned_text else text
+
+def parse_text_to_json(text: str) -> Optional[Dict]:
+    """
+    Parse text into JSON format, removing agent IDs and cleaning up the input.
+    Handles both direct JSON input and text with agent mentions.
+    
+    Args:
+        text: Input text that may contain agent IDs, JSON, or plain text
+        
+    Returns:
+        Dict: Parsed JSON data if valid JSON found, None otherwise
+    """
+    if not text or not isinstance(text, str):
+        return None
+    
+    # Remove agent IDs first
+    cleaned_text = remove_agent_ids(text)
+    
+    if not cleaned_text:
+        return None
+    
+    # Try to parse as JSON
+    try:
+        data = json.loads(cleaned_text)
+        if isinstance(data, dict):
+            return data
+    except json.JSONDecodeError:
+        # Not valid JSON, return None to treat as plain text
+        pass
+    
+    return None
+
+# ============================================================
+# LangGraph Workflow Nodes
+# ============================================================
+
+async def call_intent_dispatcher_agent(
+    ctx: Context, 
+    user_input: str, 
+    sender: str, 
+    conversation_state: Optional[Dict],
+    location: Optional[str] = None,
+    start_time: Optional[str] = None,
+    end_time: Optional[str] = None
+) -> Dict:
+    """Call intent dispatcher agent via Fetch.ai using send_and_receive"""
+    try:
+        # If we have location, start_time, or end_time, send them as JSON to agents.py
+        if location or start_time or end_time:
+            message_data = {
+                "user_request": user_input
+            }
+            if location:
+                message_data["location"] = location
+            if start_time:
+                message_data["start_time"] = start_time
+            if end_time:
+                message_data["end_time"] = end_time
+            
+            message_text = json.dumps(message_data)
+            ctx.logger.info(f"Sending JSON to intent dispatcher with location={location}, start_time={start_time}, end_time={end_time}")
+        else:
+            # No JSON values, send plain text
+            message_text = user_input
+        
+        # The intent dispatcher agent expects a ChatMessage with the user input
+        message = ChatMessage(
+            timestamp=datetime.now(timezone.utc),
+            msg_id=uuid4(),
+            content=[TextContent(type="text", text=message_text)],
+        )
+        
+        ctx.logger.info(f"Sending request to intent dispatcher agent: {INTENT_DISPATCHER_AGENT_ADDRESS}")
+        ctx.logger.info(f"Orchestrator address (for dispatcher to respond to): {ctx.agent.address}")
+        
+        # Use send_and_receive - acknowledgements are disabled in agents.py
+        ctx.logger.info("Waiting for response from intent dispatcher using send_and_receive...")
+        reply, status = await ctx.send_and_receive(
+            INTENT_DISPATCHER_AGENT_ADDRESS,
+            message,
+            response_type=ChatMessage,  # Expect ChatMessage response
+            timeout=120.0
+        )
+        
+        if isinstance(reply, ChatMessage):
+            # Extract text content from ChatMessage
+            response_text = ""
+            for item in reply.content:
+                if isinstance(item, TextContent):
+                    response_text = item.text
+                    break
+            
+            if not response_text:
+                return {"type": "error", "data": {"error": "No text content in response"}}
+            
+            ctx.logger.info(f"✓ Received response from intent dispatcher: {len(response_text)} chars")
+            ctx.logger.info(f"Intent dispatcher response: {response_text[:200]}...")
+            
+            # Try to parse as JSON first
+            try:
+                response_data = json.loads(response_text)
+                
+                # Check if it's a dispatch plan (has activity_list)
+                if isinstance(response_data, dict) and "activity_list" in response_data:
+                    return {
+                        "type": "dispatch_plan",
+                        "data": response_data
+                    }
+                # Check if it's an error
+                elif isinstance(response_data, dict) and response_data.get("type") == "error":
+                    return {
+                        "type": "error",
+                        "data": response_data
+                    }
+                # Otherwise, treat as dispatch plan if it's a dict
+                elif isinstance(response_data, dict):
+                    return {
+                        "type": "dispatch_plan",
+                        "data": response_data
+                    }
+            except json.JSONDecodeError:
+                # If not JSON, it's likely a clarification prompt (plain text)
+                # The intent dispatcher sends clarification prompts as plain text
+                ctx.logger.info("Response is not JSON, treating as clarification prompt")
+                return {
+                    "type": "clarification_needed",
+                    "data": {
+                        "prompt": response_text,
+                        "conversation_state": conversation_state
+                    }
+                }
+            
+            return {"type": "error", "data": {"error": "Unable to parse intent dispatcher response"}}
+        else:
+            ctx.logger.error(f"Failed to receive response from intent dispatcher: {status}")
+            return {"type": "error", "data": {"error": f"Failed to receive response: {status}"}}
+        
+    except Exception as e:
+        ctx.logger.error(f"Error calling intent dispatcher agent: {e}")
+        import traceback
+        ctx.logger.error(traceback.format_exc())
+        return {"type": "error", "data": {"error": str(e)}}
+
+async def dispatch_intent_node(state: OrchestratorState, ctx: Context) -> OrchestratorState:
+    """Node 1: Dispatch user intent by calling intent dispatcher agent"""
+    try:
+        user_input = state["user_input"]
+        sender = state["sender"]
+        conversation_state = state.get("conversation_state")
+        location = state.get("location")
+        start_time = state.get("start_time")
+        end_time = state.get("end_time")
+        
+        # Call intent dispatcher agent via Fetch.ai with location and times
+        result = await call_intent_dispatcher_agent(
+            ctx, user_input, sender, conversation_state, 
+            location=location, start_time=start_time, end_time=end_time
+        )
+        
+        state["dispatch_result"] = result
+        
+        # If we got a dispatch plan, extract the data
+        if result.get("type") == "dispatch_plan":
+            state["dispatch_plan"] = result.get("data", {})
+        elif result.get("type") == "clarification_needed":
+            # Store conversation state for next interaction
+            state["conversation_state"] = result.get("data", {}).get("conversation_state")
+        
+        return state
+    except Exception as e:
+        state["error"] = f"Intent dispatch error: {str(e)}"
+        return state
+
+def extract_parameters_node(state: OrchestratorState) -> OrchestratorState:
+    """Node 2: Extract parameters from dispatch plan and use JSON inputs"""
+    try:
+        dispatch_plan = state.get("dispatch_plan")
+        
+        if not dispatch_plan:
+            state["error"] = "No dispatch plan available"
+            return state
+        
+        # Extract activities and budget from dispatch plan (from user_request)
+        activities = dispatch_plan.get("activity_list", [])
+        constraints = dispatch_plan.get("constraints", {})
+        
+        state["activities"] = activities
+        # Location, start_time, end_time come from JSON input (already set in handle_user_message)
+        # Only override location if not already set from JSON
+        if not state.get("location"):
+            state["location"] = constraints.get("location", "")
+        
+        # Budget comes from dispatch plan (extracted from user_request)
+        state["budget"] = constraints.get("budget") or 500.0  # Default budget if not provided
+        
+        # Calculate timeframe from start_time and end_time if available
+        start_time = state.get("start_time")
+        end_time = state.get("end_time")
+        
+        if start_time and end_time:
+            # Try to calculate timeframe from dates
+            try:
+                from datetime import datetime as dt
+                start = dt.fromisoformat(start_time.replace('Z', '+00:00'))
+                end = dt.fromisoformat(end_time.replace('Z', '+00:00'))
+                days = (end - start).days
+                hours = (end - start).total_seconds() / 3600
+                if days == 0:
+                    if hours < 12:
+                        state["timeframe"] = f"{int(hours)} hours"
+                    else:
+                        state["timeframe"] = "1 day"
+                elif days == 1:
+                    state["timeframe"] = "weekend"
+                else:
+                    state["timeframe"] = f"{days} days"
+            except Exception as e:
+                # Error calculating timeframe, use default
+                state["timeframe"] = constraints.get("timeframe") or "weekend"
+        else:
+            state["timeframe"] = constraints.get("timeframe") or "weekend"
+        
+        return state
+    except Exception as e:
+        state["error"] = f"Parameter extraction error: {str(e)}"
+        return state
+
+async def call_fund_allocation_agent(ctx: Context, activities: List[str], location: str, budget: float) -> Dict:
+    """Call fund allocation agent using send_and_receive"""
+    try:
+        request_data = {
+            "activities": activities,
+            "location": location,
+            "budget": budget
+        }
+        
+        message = ChatMessage(
+            timestamp=datetime.now(timezone.utc),
+            msg_id=uuid4(),
+            content=[TextContent(type="text", text=json.dumps(request_data))],
+        )
+        
+        ctx.logger.info(f"Sending request to fund allocation agent: {FUND_ALLOCATION_AGENT_ADDRESS}")
+        
+        # Use send_and_receive
+        reply, status = await ctx.send_and_receive(
+            FUND_ALLOCATION_AGENT_ADDRESS,
+            message,
+            response_type=ChatMessage,
+            timeout=120.0
+        )
+        
+        if isinstance(reply, ChatMessage):
+            # Extract text content
+            response_text = ""
+            for item in reply.content:
+                if isinstance(item, TextContent):
+                    response_text = item.text
+                    break
+            
+            if not response_text:
+                return {"error": "No text content in response"}
+            
+            ctx.logger.info(f"Received response from fund allocation agent: {len(response_text)} chars")
+            
+            # Parse JSON response
+            try:
+                return json.loads(response_text)
+            except json.JSONDecodeError as e:
+                ctx.logger.error(f"JSON parse error: {e}, content: {response_text[:200]}")
+                return {"error": "Failed to parse fund allocation response"}
+        else:
+            ctx.logger.error(f"Failed to receive response from fund allocation agent: {status}")
+            return {"error": f"Failed to receive response: {status}"}
+        
+    except Exception as e:
+        ctx.logger.error(f"Error calling fund allocation agent: {e}")
+        import traceback
+        ctx.logger.error(traceback.format_exc())
+        return {"error": str(e)}
+
+async def call_events_scraper_agent(ctx: Context, activities: List[str], location: str, budget: float, timeframe: str) -> Dict:
+    """Call events scraper agent using send_and_receive"""
+    try:
+        request_data = {
+            "location": location,
+            "timeframe": timeframe,
+            "budget": budget,
+            "interest_activities": activities  # Events scraper expects interest_activities
+        }
+        
+        message = ChatMessage(
+            timestamp=datetime.now(timezone.utc),
+            msg_id=uuid4(),
+            content=[TextContent(type="text", text=json.dumps(request_data))],
+        )
+        
+        ctx.logger.info(f"Sending request to events scraper agent: {EVENTS_SCRAPER_AGENT_ADDRESS}")
+        
+        # Use send_and_receive
+        reply, status = await ctx.send_and_receive(
+            EVENTS_SCRAPER_AGENT_ADDRESS,
+            message,
+            response_type=ChatMessage,
+            timeout=120.0
+        )
+        
+        if isinstance(reply, ChatMessage):
+            # Extract text content
+            response_text = ""
+            for item in reply.content:
+                if isinstance(item, TextContent):
+                    response_text = item.text
+                    break
+            
+            if not response_text:
+                return {"error": "No text content in response"}
+            
+            ctx.logger.info(f"Received response from events scraper agent: {len(response_text)} chars")
+            
+            # Parse JSON response
+            try:
+                return json.loads(response_text)
+            except json.JSONDecodeError as e:
+                ctx.logger.error(f"JSON parse error: {e}, content: {response_text[:200]}")
+                return {"error": "Failed to parse events scraper response"}
+        else:
+            ctx.logger.error(f"Failed to receive response from events scraper agent: {status}")
+            return {"error": f"Failed to receive response: {status}"}
+        
+    except Exception as e:
+        ctx.logger.error(f"Error calling events scraper agent: {e}")
+        import traceback
+        ctx.logger.error(traceback.format_exc())
+        return {"error": str(e)}
+
+async def parallel_agent_calls_node(state: OrchestratorState, ctx: Context) -> OrchestratorState:
+    """Node 3: Call both agents in parallel"""
+    try:
+        activities = state["activities"]
+        location = state["location"]
+        budget = state["budget"]
+        timeframe = state["timeframe"]
+        
+        if not activities or not location:
+            state["error"] = "Missing required parameters: activities or location"
+            return state
+        
+        ctx.logger.info(f"Calling agents in parallel: activities={activities}, location={location}, budget={budget}")
+        
+        # Create tasks for parallel execution
+        fund_allocation_task = call_fund_allocation_agent(ctx, activities, location, budget)
+        events_scraper_task = call_events_scraper_agent(ctx, activities, location, budget, timeframe)
+        
+        # Execute both in parallel
+        fund_allocation_response, events_scraper_response = await asyncio.gather(
+            fund_allocation_task,
+            events_scraper_task,
+            return_exceptions=True
+        )
+        
+        # Handle exceptions
+        if isinstance(fund_allocation_response, Exception):
+            ctx.logger.error(f"Fund allocation error: {fund_allocation_response}")
+            state["fund_allocation_response"] = {"error": str(fund_allocation_response)}
+        else:
+            state["fund_allocation_response"] = fund_allocation_response
+        
+        if isinstance(events_scraper_response, Exception):
+            ctx.logger.error(f"Events scraper error: {events_scraper_response}")
+            state["events_scraper_response"] = {"error": str(events_scraper_response)}
+        else:
+            state["events_scraper_response"] = events_scraper_response
+        
+        return state
+    except Exception as e:
+        state["error"] = f"Parallel agent calls error: {str(e)}"
+        return state
+
+def combine_outputs_node(state: OrchestratorState) -> OrchestratorState:
+    """Node 4: Combine outputs from both agents"""
+    try:
+        fund_allocation = state.get("fund_allocation_response", {})
+        events_scraper = state.get("events_scraper_response", {})
+        location = state.get("location", "")
+        budget = state.get("budget", 0)
+        
+        # Combine the outputs
+        combined_output = {
+            "location": location,
+            "budget": budget,
+            "fund_allocation": fund_allocation,
+            "events_scraper": events_scraper,
+            "summary": {
+                "activities_found": len(events_scraper.get("activities", [])),
+                "total_estimated_cost": fund_allocation.get("activities", []),
+                "leftover_budget": fund_allocation.get("leftover_budget", 0)
+            }
+        }
+        
+        state["final_output"] = combined_output
+        return state
+    except Exception as e:
+        state["error"] = f"Combine outputs error: {str(e)}"
+        return state
+
+def should_continue(state: OrchestratorState) -> str:
+    """Conditional edge: Check if we should continue or handle errors/clarifications"""
+    if state.get("error"):
+        return "error"
+    
+    dispatch_result = state.get("dispatch_result", {})
+    if dispatch_result.get("type") == "clarification_needed":
+        return "clarification"
+    
+    if dispatch_result.get("type") == "dispatch_plan":
+        return "continue"
+    
+    return "error"
+
+def handle_clarification_node(state: OrchestratorState) -> OrchestratorState:
+    """Handle clarification needed"""
+    dispatch_result = state.get("dispatch_result", {})
+    clarification_data = dispatch_result.get("data", {})
+    state["final_output"] = {
+        "type": "clarification_needed",
+        "prompt": clarification_data.get("prompt", "Please provide more information"),
+        "conversation_state": clarification_data.get("conversation_state")
+    }
+    return state
+
+def handle_error_node(state: OrchestratorState) -> OrchestratorState:
+    """Handle errors"""
+    error = state.get("error", "Unknown error")
+    state["final_output"] = {
+        "type": "error",
+        "message": error
+    }
+    return state
+
+# ============================================================
+# LangGraph Workflow Setup
+# ============================================================
+
+# Store workflow per context (since we need ctx in nodes)
+_workflows: Dict[str, Any] = {}
+
+def get_or_create_workflow(ctx: Context) -> Any:
+    """Get or create workflow for a context"""
+    ctx_id = str(id(ctx))
+    
+    if ctx_id not in _workflows:
+        workflow = StateGraph(OrchestratorState)
+        
+        # Create wrapper functions that capture ctx
+        def make_dispatch_node():
+            async def dispatch_node(state: OrchestratorState) -> OrchestratorState:
+                return await dispatch_intent_node(state, ctx)
+            return dispatch_node
+        
+        def make_parallel_node():
+            async def parallel_node(state: OrchestratorState) -> OrchestratorState:
+                return await parallel_agent_calls_node(state, ctx)
+            return parallel_node
+        
+        # Add nodes
+        workflow.add_node("dispatch_intent", make_dispatch_node())
+        workflow.add_node("extract_parameters", extract_parameters_node)
+        workflow.add_node("parallel_calls", make_parallel_node())
+        workflow.add_node("combine_outputs", combine_outputs_node)
+        workflow.add_node("handle_clarification", handle_clarification_node)
+        workflow.add_node("handle_error", handle_error_node)
+        
+        # Set entry point
+        workflow.set_entry_point("dispatch_intent")
+        
+        # Add edges
+        workflow.add_conditional_edges(
+            "dispatch_intent",
+            should_continue,
+            {
+                "continue": "extract_parameters",
+                "clarification": "handle_clarification",
+                "error": "handle_error"
+            }
+        )
+        
+        workflow.add_edge("extract_parameters", "parallel_calls")
+        workflow.add_edge("parallel_calls", "combine_outputs")
+        workflow.add_edge("combine_outputs", END)
+        workflow.add_edge("handle_clarification", END)
+        workflow.add_edge("handle_error", END)
+        
+        _workflows[ctx_id] = workflow.compile()
+    
+    return _workflows[ctx_id]
+
+# ============================================================
+# Message Handlers
+# ============================================================
+
+@chat_proto.on_message(ChatMessage)
+async def handle_user_message(ctx: Context, sender: str, msg: ChatMessage):
+    """Handle incoming user messages and orchestrate workflow"""
+    ctx.logger.info(f"=== Orchestrator received ChatMessage ===")
+    ctx.logger.info(f"Sender: {sender}")
+    ctx.logger.info(f"Orchestrator's own address: {ctx.agent.address}")
+    ctx.logger.info(f"Message ID: {msg.msg_id}")
+    
+    # Log message content
+    for item in msg.content:
+        if isinstance(item, TextContent):
+            ctx.logger.info(f"Message content preview: {item.text[:200]}...")
+            break
+    
+    # Check if this is from one of our target agents (shouldn't happen with send_and_receive, but handle just in case)
+    if sender in [INTENT_DISPATCHER_AGENT_ADDRESS, FUND_ALLOCATION_AGENT_ADDRESS, EVENTS_SCRAPER_AGENT_ADDRESS]:
+        ctx.logger.warning(f"Received unexpected message from target agent {sender[:20]}... This shouldn't happen with send_and_receive - message may be a late response or duplicate.")
+        # Don't process as user input - just log it
+        return
+    
+    # Otherwise, this is a user message - send acknowledgement
+    try:
+        await ctx.send(
+            sender,
+            ChatAcknowledgement(timestamp=datetime.now(timezone.utc), acknowledged_msg_id=msg.msg_id),
+        )
+    except Exception as e:
+        ctx.logger.warning(f"Error sending acknowledgement: {e}")
+    
+    try:
+        # Extract user input from message
+        user_input = ""
+        for item in msg.content:
+            if isinstance(item, TextContent):
+                user_input = item.text
+                break
+        
+        if not user_input:
+            error_msg = create_text_chat("No text content found in message")
+            await ctx.send(sender, error_msg)
+            return
+        
+        # Parse text to JSON and remove agent IDs
+        parsed_json = parse_text_to_json(user_input)
+        
+        # Initialize variables
+        user_request_text = user_input
+        location_from_json = None
+        start_time_from_json = None
+        end_time_from_json = None
+        
+        if parsed_json:
+            # Check if it's an error response
+            if parsed_json.get("error"):
+                ctx.logger.warning(f"Received error as input, this might be a loop: {parsed_json}")
+                error_msg = create_text_chat(json.dumps({"type": "error", "message": "Previous request failed. Please try again with a new request."}))
+                await ctx.send(sender, error_msg)
+                return
+            
+            # Check if it's the new JSON format with start_time, end_time, location, user_request
+            if "user_request" in parsed_json and "location" in parsed_json:
+                user_request_text = parsed_json.get("user_request", "")
+                location_from_json = parsed_json.get("location", "")
+                start_time_from_json = parsed_json.get("start_time")
+                end_time_from_json = parsed_json.get("end_time")
+                ctx.logger.info(f"Parsed JSON input: location={location_from_json}, start_time={start_time_from_json}, end_time={end_time_from_json}")
+            else:
+                # JSON but not the expected format, treat user_request as the cleaned text
+                user_request_text = remove_agent_ids(user_input)
+        else:
+            # Not JSON, remove agent IDs and use as plain text
+            user_request_text = remove_agent_ids(user_input)
+        
+        ctx.logger.info(f"Processing user request: {user_request_text[:100]}...")
+        
+        # Get conversation state from storage
+        conversation_state_key = f"conversation_state_{sender}"
+        conversation_state = ctx.storage.get(conversation_state_key)
+        
+        # Initialize state with JSON values if provided
+        initial_state: OrchestratorState = {
+            "user_input": user_request_text,  # Use user_request for intent dispatcher
+            "sender": sender,
+            "conversation_state": conversation_state,
+            "dispatch_result": None,
+            "dispatch_plan": None,
+            "activities": [],
+            "location": location_from_json or "",  # Use location from JSON
+            "budget": 0.0,
+            "timeframe": "",
+            "start_time": start_time_from_json,  # Use start_time from JSON
+            "end_time": end_time_from_json,  # Use end_time from JSON
+            "fund_allocation_response": None,
+            "events_scraper_response": None,
+            "final_output": None,
+            "error": None
+        }
+        
+        # Create and run workflow
+        workflow = get_or_create_workflow(ctx)
+        final_state = await workflow.ainvoke(initial_state)
+        
+        # Update conversation state if needed
+        if final_state.get("conversation_state"):
+            ctx.storage.set(conversation_state_key, final_state["conversation_state"])
+        elif conversation_state and final_state.get("final_output", {}).get("type") == "dispatch_plan":
+            # Clear conversation state after successful dispatch
+            ctx.storage.set(conversation_state_key, None)
+        
+        # Send final output
+        final_output = final_state.get("final_output", {})
+        output_text = json.dumps(final_output, indent=2)
+        
+        response_msg = create_text_chat(
+            output_text,
+            end_session=final_output.get("type") != "clarification_needed"
+        )
+        
+        await ctx.send(sender, response_msg)
+        
+    except Exception as e:
+        ctx.logger.error(f"Orchestrator error: {e}")
+        import traceback
+        ctx.logger.error(traceback.format_exc())
+        error_msg = create_text_chat(f"Error processing request: {str(e)}")
+        try:
+            await ctx.send(sender, error_msg)
+        except:
+            pass
+
+@chat_proto.on_message(ChatAcknowledgement)
+async def handle_ack(ctx: Context, sender: str, msg: ChatAcknowledgement):
+    """Handle acknowledgement messages - these are expected and should not interfere with send_and_receive"""
+    # Just log and ignore - acknowledgements are separate from the actual response
+    ctx.logger.info(f"Orchestrator received acknowledgement from {sender} for msg {msg.acknowledged_msg_id}")
+    
+    # If this is from the intent dispatcher and we're waiting, log it
+    if sender == INTENT_DISPATCHER_AGENT_ADDRESS:
+        ctx.logger.info(f"Received acknowledgement from intent dispatcher while waiting for response")
+
+def create_text_chat(text: str, end_session: bool = False) -> ChatMessage:
+    """Helper to create text chat message"""
+    from uagents_core.contrib.protocols.chat import EndSessionContent
+    content = [TextContent(type="text", text=text)]
+    if end_session:
+        content.append(EndSessionContent(type="end-session"))
+    return ChatMessage(
+        timestamp=datetime.now(timezone.utc),
+        msg_id=uuid4(),
+        content=content,
+    )
+
+# No longer needed - using send_and_receive which handles timeouts internally
+# @agent.on_interval(period=5.0)
+# async def check_pending_responses(ctx: Context):
+#     """Periodically check if we have pending responses waiting"""
+#     pass
+
+# Include chat protocol
+agent.include(chat_proto, publish_manifest=True)
+
+if __name__ == "__main__":
+    print(f"LangGraph Orchestrator Agent address: {agent.address}")
+    print(f"Intent Dispatcher Agent address: {INTENT_DISPATCHER_AGENT_ADDRESS}")
+    print(f"Fund Allocation Agent address: {FUND_ALLOCATION_AGENT_ADDRESS}")
+    print(f"Events Scraper Agent address: {EVENTS_SCRAPER_AGENT_ADDRESS}")
+    print("\nStarting orchestrator agent...")
+    agent.run()
+

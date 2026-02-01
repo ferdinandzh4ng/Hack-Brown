@@ -14,6 +14,7 @@ from datetime import datetime
 from uuid import uuid4
 import json
 import os
+import re
 from dotenv import load_dotenv
 from openai import OpenAI
 
@@ -39,6 +40,8 @@ class ScrapedActivity(Model):
     duration: str
     best_time: str  # e.g., "morning", "afternoon", "evening"
     difficulty: str  # "easy", "moderate", "challenging"
+    address: Optional[str] = None
+    phone: Optional[str] = None
     url: Optional[str] = None
 
 class ScraperResponse(Model):
@@ -64,35 +67,50 @@ client = OpenAI(
 # ============================================================
 
 ACTIVITY_SCRAPER_PROMPT = """
-You are an expert travel activity scraper and curator. Given a location, timeframe, budget, and user interests, 
-generate a comprehensive list of activities and experiences available in that location.
+You are an expert travel researcher and activity curator. Your job is to RESEARCH and find REAL, SPECIFIC venues and activities in the given location.
+
+CRITICAL REQUIREMENTS:
+1. You MUST research the actual location and find REAL venues that exist there. Do NOT make up or guess venues.
+2. Return SPECIFIC, REAL venues - not generic activities. Examples:
+   - For "eat" or "dining": Research actual restaurants in the location like "The Cheesecake Factory", "Olive Garden", local popular restaurants, etc.
+   - For "shop": Research actual malls like "Westfield Mall", "The Galleria", specific stores like "Nike Store", "Apple Store", etc.
+   - For "sightsee": Research actual landmarks like "Empire State Building", "Golden Gate Bridge", "Times Square", etc.
+   - For "adventure": Research actual venues like "Sky Zone Trampoline Park", "Rock Climbing Gym", etc.
+
+3. ALL addresses MUST be REAL, VERIFIABLE addresses in the specified location. Research actual street addresses.
+   Format: "Street Number Street Name, City, State ZIP" or "Street Number Street Name, City, Country"
+   Example: "350 5th Ave, New York, NY 10118" or "100 Queen St W, Toronto, ON M5H 2N2"
+
+4. Descriptions should be 2-3 sentences describing what makes this specific venue unique, what you can do there, and why it's worth visiting.
+
+5. Research popular, well-known venues that are actually in the specified location. Use your knowledge of real places.
 
 For each activity, provide:
-1. Name of the activity/event
+1. Name of the SPECIFIC venue/restaurant/mall/landmark (must be a real, specific place that exists in the location)
 2. Category (must match or relate to one of the user's interests)
-3. Description (2-3 sentences)
-4. Estimated cost in USD
+3. Description (2-3 sentences about this specific place - what it offers, atmosphere, specialties)
+4. Estimated cost in USD (per person or per activity) - research typical costs
 5. Duration (e.g., "2 hours", "half day", "full day")
 6. Best time to do it (morning/afternoon/evening/flexible)
 7. Difficulty level (easy/moderate/challenging)
-8. Address (if known)
-9. Phone number (if known)
-10. Website URL (if known)
+8. Address (REQUIRED - must be a real, verifiable address in the location)
+9. Phone number (if known - use real format)
+10. Website URL (if known - use real URLs)
 
 Return ONLY valid JSON in this format:
 {{
   "activities": [
     {{
-      "name": "Activity Name",
+      "name": "Specific Venue Name (e.g., 'The Cheesecake Factory', 'Westfield Century City', 'Central Park')",
       "category": "activity_type",
-      "description": "Description of the activity",
+      "description": "2-3 sentences describing this specific place - what makes it special, what you can do there, atmosphere, specialties",
       "estimated_cost": 45.00,
       "duration": "2 hours",
       "best_time": "morning",
       "difficulty": "moderate",
-      "address": "123 Main St, City, State",
+      "address": "REAL street address in the location (e.g., '350 5th Ave, New York, NY 10118')",
       "phone": "+1-555-123-4567",
-      "url": "https://example.com"
+      "url": "https://real-website.com"
     }}
   ],
   "total_budget_analysis": {{
@@ -107,9 +125,14 @@ Return ONLY valid JSON in this format:
   ]
 }}
 
-IMPORTANT: Generate exactly 4-5 activities/events/venues for EACH interest category provided by the user.
-Mix price ranges and difficulty levels across each category. Ensure variety within each interest type.
-Include realistic addresses and contact information where possible.
+IMPORTANT: 
+- RESEARCH the location and find REAL venues that actually exist there
+- Generate exactly 4-5 SPECIFIC, REAL venues for EACH interest category provided by the user
+- ALL addresses MUST be real, verifiable addresses in the specified location
+- Focus on specific restaurants, malls, stores, landmarks, and venues - not generic activity types
+- Mix price ranges and difficulty levels across each category
+- Ensure variety within each interest type
+- If you don't know specific venues in the location, research common/popular venues for that city
 """
 
 BUDGET_ANALYSIS_PROMPT = """
@@ -130,94 +153,6 @@ Return JSON analysis:
 """
 
 # ============================================================
-# Fallback Mock Data
-# ============================================================
-
-def generate_mock_activities(
-    location: str,
-    timeframe: str,
-    budget: float,
-    interest_activities: List[str]
-) -> Dict:
-    """
-    Generate realistic mock activity data as fallback when API fails
-    """
-    mock_activities = {
-        "skiing": [
-            {"name": "Mountain Peak Ski Resort", "category": "skiing", "description": "Full-service ski resort with varied terrain for all levels.", "estimated_cost": 75, "duration": "full day", "best_time": "morning", "difficulty": "moderate"},
-            {"name": "Beginner Ski Lessons", "category": "skiing", "description": "Professional instruction for first-time skiers in a safe environment.", "estimated_cost": 95, "duration": "3 hours", "best_time": "morning", "difficulty": "easy"},
-            {"name": "Night Skiing Experience", "category": "skiing", "description": "Skiing under lights on groomed runs with a festive atmosphere.", "estimated_cost": 60, "duration": "4 hours", "best_time": "evening", "difficulty": "moderate"},
-            {"name": "Backcountry Ski Tour", "category": "skiing", "description": "Off-piste skiing adventure with experienced guides in remote terrain.", "estimated_cost": 150, "duration": "full day", "best_time": "morning", "difficulty": "challenging"},
-            {"name": "Ski Equipment Rental", "category": "skiing", "description": "Premium ski and snowboard rental packages for all skill levels.", "estimated_cost": 45, "duration": "flexible", "best_time": "flexible", "difficulty": "easy"},
-        ],
-        "hiking": [
-            {"name": "Mountain Trail Loop", "category": "hiking", "description": "Scenic 8-mile loop with breathtaking views and moderate elevation gain.", "estimated_cost": 0, "duration": "4 hours", "best_time": "morning", "difficulty": "moderate"},
-            {"name": "Waterfall Hike Adventure", "category": "hiking", "description": "Trek to cascading waterfalls through diverse forest ecosystems.", "estimated_cost": 25, "duration": "5 hours", "best_time": "morning", "difficulty": "moderate"},
-            {"name": "Summit Challenge Hike", "category": "hiking", "description": "Demanding ascent to high altitude peaks with panoramic views.", "estimated_cost": 0, "duration": "6 hours", "best_time": "early morning", "difficulty": "challenging"},
-            {"name": "Guided Nature Walk", "category": "hiking", "description": "Educational walk with naturalist guide learning about local flora and fauna.", "estimated_cost": 35, "duration": "2 hours", "best_time": "afternoon", "difficulty": "easy"},
-            {"name": "Rock Climbing Trail", "category": "hiking", "description": "Hiking combined with scrambling and light climbing sections.", "estimated_cost": 40, "duration": "5 hours", "best_time": "morning", "difficulty": "challenging"},
-        ],
-        "sightseeing": [
-            {"name": "Historic Downtown Tour", "category": "sightseeing", "description": "Guided walking tour of historic architecture and cultural landmarks.", "estimated_cost": 20, "duration": "2 hours", "best_time": "afternoon", "difficulty": "easy"},
-            {"name": "Museum of Art & Culture", "category": "sightseeing", "description": "Extensive collections of regional and international artwork and artifacts.", "estimated_cost": 15, "duration": "3 hours", "best_time": "afternoon", "difficulty": "easy"},
-            {"name": "Panoramic Viewpoint", "category": "sightseeing", "description": "Stunning observation platform overlooking the city and surrounding landscape.", "estimated_cost": 10, "duration": "1 hour", "best_time": "sunset", "difficulty": "easy"},
-            {"name": "Scenic Drive Route", "category": "sightseeing", "description": "Self-guided driving tour through picturesque landscapes and scenic overlooks.", "estimated_cost": 0, "duration": "3 hours", "best_time": "flexible", "difficulty": "easy"},
-            {"name": "Local Food & Craft Market", "category": "sightseeing", "description": "Vibrant marketplace showcasing regional crafts, food, and local vendors.", "estimated_cost": 30, "duration": "2 hours", "best_time": "morning", "difficulty": "easy"},
-        ],
-        "dining": [
-            {"name": "Fine Dining Restaurant", "category": "dining", "description": "Upscale culinary experience with locally-sourced ingredients and creative cuisine.", "estimated_cost": 85, "duration": "2.5 hours", "best_time": "evening", "difficulty": "easy"},
-            {"name": "Street Food Tour", "category": "dining", "description": "Guided tasting of authentic street food and local specialties.", "estimated_cost": 40, "duration": "3 hours", "best_time": "afternoon", "difficulty": "easy"},
-            {"name": "Brewery Tour & Tasting", "category": "dining", "description": "Behind-the-scenes tour of a local craft brewery with beer tastings.", "estimated_cost": 25, "duration": "2 hours", "best_time": "afternoon", "difficulty": "easy"},
-            {"name": "Farm-to-Table Dining", "category": "dining", "description": "Seasonal menu featuring fresh produce from local farms and producers.", "estimated_cost": 65, "duration": "2 hours", "best_time": "evening", "difficulty": "easy"},
-            {"name": "Cooking Class Experience", "category": "dining", "description": "Learn to prepare regional dishes from a professional chef.", "estimated_cost": 55, "duration": "3 hours", "best_time": "afternoon", "difficulty": "easy"},
-        ],
-        "adventure": [
-            {"name": "Zip Lining Course", "category": "adventure", "description": "Exhilarating zip line experience through forest canopy.", "estimated_cost": 80, "duration": "2 hours", "best_time": "morning", "difficulty": "moderate"},
-            {"name": "Whitewater Rafting", "category": "adventure", "description": "Thrilling river rafting adventure with experienced guides.", "estimated_cost": 70, "duration": "4 hours", "best_time": "morning", "difficulty": "moderate"},
-            {"name": "Paragliding Experience", "category": "adventure", "description": "Tandem paragliding with certified instructors over scenic terrain.", "estimated_cost": 120, "duration": "2 hours", "best_time": "early morning", "difficulty": "moderate"},
-            {"name": "Rock Climbing Gym", "category": "adventure", "description": "Indoor climbing facility with routes for all skill levels.", "estimated_cost": 20, "duration": "2 hours", "best_time": "flexible", "difficulty": "moderate"},
-            {"name": "Canyoneering Adventure", "category": "adventure", "description": "Explore narrow canyons via hiking, scrambling, and rappelling.", "estimated_cost": 95, "duration": "full day", "best_time": "morning", "difficulty": "challenging"},
-        ],
-    }
-    
-    # Build activities list based on user interests
-    activities = []
-    for interest in interest_activities:
-        interest_lower = interest.lower()
-        if interest_lower in mock_activities:
-            activities.extend(mock_activities[interest_lower])
-        else:
-            # Generic fallback for unknown interests
-            activities.append({
-                "name": f"Popular {interest.title()} Activity",
-                "category": interest_lower,
-                "description": f"Experience authentic {interest.lower()} activities in {location}.",
-                "estimated_cost": 50,
-                "duration": "3 hours",
-                "best_time": "afternoon",
-                "difficulty": "moderate"
-            })
-    
-    # Calculate budget analysis
-    total_estimated = sum(a.get("estimated_cost", 0) for a in activities)
-    remaining = budget - total_estimated
-    
-    return {
-        "activities": activities,
-        "total_budget_analysis": {
-            "total_available": budget,
-            "total_estimated": total_estimated,
-            "remaining_budget": max(0, remaining),
-            "budget_per_day": budget / (int(timeframe.split()[0]) if timeframe.split()[0].isdigit() else 1)
-        },
-        "recommendations": [
-            f"Combine {activities[0]['name']} with {activities[1]['name']} for a full day",
-            f"Book {activities[2]['name']} in advance for better rates",
-            f"Save budget for meals at local restaurants"
-        ]
-    }
-
-# ============================================================
 # Events Scraper Functions
 # ============================================================
 
@@ -231,41 +166,127 @@ def scrape_activities(
     Scrape activities for a given location and preferences
     Returns structured activity list with budget analysis
     Generates 4-5 activities per interest category
-    Falls back to mock data if API fails
+    Uses AI to research real venues in the location
     """
-    try:
-        interests_str = ", ".join(interest_activities)
-        num_interests = len(interest_activities)
-        
-        prompt = f"""
+    interests_str = ", ".join(interest_activities)
+    num_interests = len(interest_activities)
+    
+    prompt = f"""
 Location: {location}
 Timeframe: {timeframe}
 Total Budget: ${budget}
 User Interests: {interests_str} ({num_interests} categories)
 
-Generate 4-5 activities/events/venues for EACH of these {num_interests} interest categories in {location}.
+RESEARCH and find 4-5 SPECIFIC, REAL venues for EACH of these {num_interests} interest categories in {location}.
 This should total approximately {num_interests * 4}-{num_interests * 5} activities (about 4-5 per category).
-Mix price ranges within each category and ensure variety and quality in recommendations.
+
+CRITICAL REQUIREMENTS:
+- RESEARCH the location {location} and find REAL venues that actually exist there
+- Return SPECIFIC venues: actual restaurant names, mall names, store names, landmark names - NOT generic activity types
+- For "eat" or "dining": Research and return specific restaurants in {location} like popular chains, local favorites, etc.
+- For "shop": Research and return specific malls, shopping centers, or stores in {location}
+- For "sightsee": Research and return specific landmarks, attractions, parks, museums in {location}
+- For "adventure": Research and return specific adventure venues, parks, activities in {location}
+- ALL addresses MUST be real, verifiable street addresses in {location}
+- Descriptions should be 2-3 sentences about what makes each specific place unique and worth visiting
+- Mix price ranges within each category and ensure variety and quality in recommendations
+- Use your knowledge to find well-known, popular venues that are actually in {location}
 """
+    
+    # Retry logic for API calls
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            response = client.chat.completions.create(
+                model="asi1-mini",
+                messages=[
+                    {"role": "system", "content": ACTIVITY_SCRAPER_PROMPT},
+                    {"role": "user", "content": prompt},
+                ],
+                max_tokens=3000,  # Increased for more detailed responses
+                timeout=60  # Increased timeout for research
+            )
+            
+            response_text = response.choices[0].message.content.strip()
+            
+            # Try to extract JSON from response (handle cases where AI adds extra text)
+            # Look for JSON object in the response
+            json_match = re.search(r'\{.*\}', response_text, re.DOTALL)
+            if json_match:
+                response_text = json_match.group(0)
+            
+            scraped_data = json.loads(response_text)
+            
+            # Validate that we got activities
+            if not scraped_data.get("activities") or len(scraped_data.get("activities", [])) == 0:
+                print(f"Warning: No activities returned from AI, retrying... (attempt {attempt + 1}/{max_retries})")
+                if attempt < max_retries - 1:
+                    continue
+                else:
+                    # Last attempt failed, return minimal structure
+                    return {
+                        "activities": [],
+                        "total_budget_analysis": {
+                            "total_available": budget,
+                            "total_estimated": 0,
+                            "remaining_budget": budget,
+                            "budget_per_day": budget
+                        },
+                        "recommendations": ["Unable to find activities. Please try again or provide more specific interests."]
+                    }
+            
+            return scraped_data
+            
+        except json.JSONDecodeError as e:
+            print(f"JSON decode error (attempt {attempt + 1}/{max_retries}): {e}")
+            print(f"Response text: {response_text[:500]}...")
+            if attempt < max_retries - 1:
+                # Add instruction to return only JSON
+                prompt += "\n\nIMPORTANT: Return ONLY valid JSON, no additional text or explanations."
+                continue
+            else:
+                # Last attempt failed
+                print(f"Failed to parse JSON after {max_retries} attempts")
+                return {
+                    "activities": [],
+                    "total_budget_analysis": {
+                        "total_available": budget,
+                        "total_estimated": 0,
+                        "remaining_budget": budget,
+                        "budget_per_day": budget
+                    },
+                    "recommendations": ["Error parsing activity data. Please try again."]
+                }
         
-        response = client.chat.completions.create(
-            model="asi1-mini",
-            messages=[
-                {"role": "system", "content": ACTIVITY_SCRAPER_PROMPT},
-                {"role": "user", "content": prompt},
-            ],
-            max_tokens=2000,
-            timeout=30
-        )
-        
-        scraped_data = json.loads(response.choices[0].message.content)
-        return scraped_data
-        
-    except Exception as e:
-        print(f"Activity scraping error: {e}")
-        print(f"Using fallback mock data for {location}")
-        # Return mock data as fallback
-        return generate_mock_activities(location, timeframe, budget, interest_activities)
+        except Exception as e:
+            print(f"Activity scraping error (attempt {attempt + 1}/{max_retries}): {e}")
+            if attempt < max_retries - 1:
+                continue
+            else:
+                # Last attempt failed - return error structure instead of mock data
+                print(f"Failed to scrape activities after {max_retries} attempts")
+                return {
+                    "activities": [],
+                    "total_budget_analysis": {
+                        "total_available": budget,
+                        "total_estimated": 0,
+                        "remaining_budget": budget,
+                        "budget_per_day": budget
+                    },
+                    "recommendations": [f"Unable to research activities for {location}. Please try again or check the location name."]
+                }
+    
+    # Should not reach here, but just in case
+    return {
+        "activities": [],
+        "total_budget_analysis": {
+            "total_available": budget,
+            "total_estimated": 0,
+            "remaining_budget": budget,
+            "budget_per_day": budget
+        },
+        "recommendations": ["Unable to retrieve activities. Please try again."]
+    }
 
 def analyze_budget_feasibility(
     budget: float,
@@ -318,6 +339,8 @@ def format_scraper_response(
             duration=activity_data.get("duration", ""),
             best_time=activity_data.get("best_time", ""),
             difficulty=activity_data.get("difficulty", ""),
+            address=activity_data.get("address"),
+            phone=activity_data.get("phone"),
             url=activity_data.get("url")
         )
         activities_list.append(activity)
@@ -430,11 +453,8 @@ async def handle_scraper_request(ctx: Context, sender: str, msg: ChatMessage):
     """
     ctx.logger.info(f"Scraper received message from {sender}")
     
-    # Send acknowledgement
-    await ctx.send(
-        sender,
-        ChatAcknowledgement(timestamp=datetime.utcnow(), acknowledged_msg_id=msg.msg_id),
-    )
+    # NOTE: Not sending ChatAcknowledgement to avoid interfering with ctx.send_and_receive
+    # The orchestrator uses send_and_receive which can match acknowledgements instead of actual responses
     
     try:
         for item in msg.content:
@@ -483,7 +503,7 @@ async def handle_scraper_request(ctx: Context, sender: str, msg: ChatMessage):
                 
                 ctx.logger.info(f"Valid request for {prefs.location} with interests: {prefs.interest_activities}")
                 
-                # Scrape activities (with fallback to mock data)
+                # Scrape activities using AI
                 scraped_data = scrape_activities(
                     prefs.location,
                     prefs.timeframe,
@@ -509,26 +529,20 @@ async def handle_scraper_request(ctx: Context, sender: str, msg: ChatMessage):
                     budget_analysis
                 )
                 
-                # Convert to JSON-serializable format
+                # Convert to JSON-serializable format - include description as requested
                 response_json = {
-                    "type": "scraper_response",
-                    "location": response.location,
-                    "total_activities_found": response.total_activities_found,
                     "activities": [
                         {
                             "name": a.name,
-                            "category": a.category,
                             "description": a.description,
-                            "estimated_cost": a.estimated_cost,
-                            "duration": a.duration,
-                            "best_time": a.best_time,
-                            "difficulty": a.difficulty,
-                            "url": a.url
+                            "address": a.address,
+                            "phone": a.phone,
+                            "url": a.url,
+                            "category": a.category,
+                            "estimated_cost": a.estimated_cost
                         }
                         for a in response.activities
-                    ],
-                    "budget_analysis": response.budget_analysis,
-                    "recommendations": response.recommendations
+                    ]
                 }
                 
                 ctx.logger.info(f"Sending response to {sender}")

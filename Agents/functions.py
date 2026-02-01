@@ -98,16 +98,20 @@ Analyze the following user request and determine if it's too vague to create a s
 
 A request is considered vague if:
 - It only mentions a location without specific activities (e.g., "Plan me a day in New York", "I want to visit Paris")
-- It lacks clear preferences or interests
+- It lacks clear preferences or interests AND doesn't specify activity types
 - It's too general and doesn't specify what types of activities the user wants
 - It asks for a "day plan" or "itinerary" without specifying activities
 
 A request is NOT vague if:
 - It mentions specific activities (e.g., "I want to visit the Eiffel Tower and eat at a French restaurant")
 - It includes clear preferences (e.g., "I like museums and art galleries")
-- It specifies activity types (e.g., "I want to go shopping and sightseeing")
+- It specifies activity types (e.g., "I want to go shopping and sightseeing", "eat and sightsee", "dining and sightseeing")
+- It mentions activity categories like "eat", "dining", "sightsee", "sightseeing", "shop", "shopping", etc. along with a budget
 
-IMPORTANT: If the request only mentions a location and asks for a plan/itinerary without specific activities, it IS vague.
+IMPORTANT: 
+- If the request specifies activity types (like "eat", "sightsee", "shop", "dining", "sightseeing") AND mentions a budget, it is NOT vague, even if location is not explicitly mentioned in the text.
+- If the request only mentions a location and asks for a plan/itinerary without specific activities, it IS vague.
+- Location is helpful but NOT required if activities and budget are specified.
 
 Return ONLY valid JSON:
 {
@@ -157,26 +161,33 @@ End time: {end_time}
 
 Return ONLY valid JSON in this format:
 
-{
+{{
   "activity_list": [
     "eat",
     "sightsee",
     "shop",
     ...
   ],
-  "constraints": {
+  "constraints": {{
     "budget": number or null,
     "start_time": "ISO 8601 datetime string or null",
     "end_time": "ISO 8601 datetime string or null",
     "location": "...",
     "preferences": [ ... ]
-  },
+  }},
   "agents_to_call": [ ... ],
   "notes": "short explanation"
-}
+}}
 
-IMPORTANT: The activity_list should contain GENERAL activity categories (like "eat", "sightsee", "shop", "entertainment", "relax", "outdoor", "cultural", etc.) 
-NOT specific activities. Use simple, one-word category names based on the user's preferences.
+CRITICAL REQUIREMENTS:
+1. The activity_list MUST contain at least one activity category. It CANNOT be empty.
+2. The activity_list should contain GENERAL activity categories (like "eat", "sightsee", "shop", "entertainment", "relax", "outdoor", "cultural", etc.) 
+3. NOT specific activities. Use simple, one-word category names based on the user's preferences.
+4. If user preferences mention "eat" or "dining" or "food", include "eat" in activity_list.
+5. If user preferences mention "sightsee" or "sightseeing" or "landmarks", include "sightsee" in activity_list.
+6. If user preferences mention "shop" or "shopping" or "markets", include "shop" in activity_list.
+7. Extract ALL relevant categories from the user preferences - do not leave the activity_list empty.
+
 {transaction_context}
 """
 
@@ -317,6 +328,22 @@ def safe_json_parse(text: str) -> dict:
     # Try to find JSON object in the text
     text = text.strip()
     
+    # Check if text is just a fragment (starts with a key name but no opening brace)
+    # This handles cases like '\n  "activity_list"' where response was cut off
+    if not text.startswith("{") and not text.startswith("["):
+        # Check if it looks like a partial JSON key
+        if text.strip().startswith('"') and ':' not in text[:50]:
+            print(f"Warning: Received incomplete JSON response (likely truncated): {text[:100]}...")
+            # If it mentions activity_list, return a minimal structure
+            if '"activity_list"' in text:
+                return {
+                    "activity_list": [],
+                    "constraints": {},
+                    "agents_to_call": [],
+                    "notes": "Incomplete response - please try again"
+                }
+            return {}
+    
     # Find the first { and last }
     start_idx = text.find("{")
     end_idx = text.rfind("}")
@@ -335,13 +362,72 @@ def safe_json_parse(text: str) -> dict:
                 except:
                     pass
             return {"general_categories": []}
+        # Check for activity_list fragment
+        if '"activity_list"' in text:
+            # Try to extract activity_list array
+            array_match = re.search(r'"activity_list"\s*:\s*(\[[^\]]*\])', text, re.DOTALL)
+            if array_match:
+                try:
+                    activities = json.loads(array_match.group(1))
+                    return {
+                        "activity_list": activities,
+                        "constraints": {},
+                        "agents_to_call": [],
+                        "notes": "Partial response - some fields may be missing"
+                    }
+                except:
+                    pass
         return {}
     
     try:
         return json.loads(text)
     except (json.JSONDecodeError, ValueError) as e:
         # If parsing fails, try to extract just the JSON part
-        # Look for common JSON patterns
+        # Use a more robust approach: find balanced braces
+        def find_balanced_json(text, start_pos=0):
+            """Find a complete JSON object starting from start_pos"""
+            if start_pos >= len(text) or text[start_pos] != '{':
+                return None
+            
+            depth = 0
+            in_string = False
+            escape_next = False
+            start = start_pos
+            
+            for i in range(start_pos, len(text)):
+                char = text[i]
+                
+                if escape_next:
+                    escape_next = False
+                    continue
+                
+                if char == '\\':
+                    escape_next = True
+                    continue
+                
+                if char == '"' and not escape_next:
+                    in_string = not in_string
+                    continue
+                
+                if not in_string:
+                    if char == '{':
+                        depth += 1
+                    elif char == '}':
+                        depth -= 1
+                        if depth == 0:
+                            return text[start:i+1]
+            
+            return None
+        
+        # Try to find a complete JSON object
+        json_text = find_balanced_json(text)
+        if json_text:
+            try:
+                return json.loads(json_text)
+            except:
+                pass
+        
+        # Fallback: try simpler regex pattern
         json_match = re.search(r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}', text, re.DOTALL)
         if json_match:
             try:
@@ -350,7 +436,51 @@ def safe_json_parse(text: str) -> dict:
                 pass
         
         # Try to fix common issues: incomplete JSON, trailing commas, etc.
-        # If we see a partial JSON structure, try to complete it
+        # If we see a partial JSON structure, try to extract what we can
+        
+        # Handle activity_list responses (for finalize_activity_list)
+        if '"activity_list"' in text:
+            result = {}
+            # Extract activity_list array
+            activity_match = re.search(r'"activity_list"\s*:\s*(\[[^\]]*(?:\{[^\}]*\}[^\]]*)*\])', text, re.DOTALL)
+            if activity_match:
+                try:
+                    result["activity_list"] = json.loads(activity_match.group(1))
+                except:
+                    result["activity_list"] = []
+            else:
+                result["activity_list"] = []
+            
+            # Extract constraints object
+            constraints_match = re.search(r'"constraints"\s*:\s*(\{[^\}]*\})', text, re.DOTALL)
+            if constraints_match:
+                try:
+                    result["constraints"] = json.loads(constraints_match.group(1))
+                except:
+                    result["constraints"] = {}
+            else:
+                result["constraints"] = {}
+            
+            # Extract agents_to_call array
+            agents_match = re.search(r'"agents_to_call"\s*:\s*(\[[^\]]*\])', text, re.DOTALL)
+            if agents_match:
+                try:
+                    result["agents_to_call"] = json.loads(agents_match.group(1))
+                except:
+                    result["agents_to_call"] = []
+            else:
+                result["agents_to_call"] = []
+            
+            # Extract notes
+            notes_match = re.search(r'"notes"\s*:\s*"([^"]*)"', text)
+            if notes_match:
+                result["notes"] = notes_match.group(1)
+            else:
+                result["notes"] = "Partial response - some fields may be missing"
+            
+            if result.get("activity_list"):
+                return result
+        
         if '"general_categories"' in text:
             # Try to find the array or object containing general_categories
             # More flexible pattern to match nested structures
@@ -375,6 +505,8 @@ def safe_json_parse(text: str) -> dict:
             }
             return result
         
+        # If all else fails, log the problematic text for debugging
+        print(f"Warning: Could not parse JSON from text: {text[:200]}...")
         return {}
 
 def check_vagueness(user_text: str) -> dict:
@@ -399,6 +531,9 @@ def check_vagueness(user_text: str) -> dict:
         # Default to vague if we can't check, so we prompt the user
         # Try to extract location from text as fallback
         import re
+        # Ensure user_text is a string before using regex
+        if not isinstance(user_text, str):
+            user_text = str(user_text)
         location_match = re.search(r'\b(?:in|at|to|visit|visit|going to|trip to)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)', user_text, re.IGNORECASE)
         location = location_match.group(1) if location_match else None
         return {"is_vague": True, "location": location, "reason": "Error checking - defaulting to vague"}
@@ -442,6 +577,58 @@ def create_preference_prompt(categories: list) -> str:
     prompt += "\nPlease reply with the numbers or names of categories you're interested in (e.g., '1, 3, 5' or 'eat, sightsee')."
     return prompt
 
+def parse_user_preferences(user_input: str, categories: Optional[List[Dict]] = None) -> str:
+    """
+    Parse user preference input (could be "1, 3, 5" or "eat, sightsee" or category names)
+    and convert to a comma-separated string of category names.
+    
+    Args:
+        user_input: User's response (e.g., "1, 3, 5" or "eat, sightsee")
+        categories: List of category dictionaries from conversation_state (optional)
+    
+    Returns:
+        Comma-separated string of category names (e.g., "eat, sightsee, shop")
+    """
+    if not user_input:
+        return ""
+    
+    # Clean the input
+    user_input = user_input.strip().lower()
+    
+    # If categories are provided, try to map numbers to category names
+    if categories and isinstance(categories, list):
+        # Check if input contains numbers
+        import re
+        numbers = re.findall(r'\d+', user_input)
+        if numbers:
+            # Map numbers to category names
+            selected_categories = []
+            for num_str in numbers:
+                try:
+                    idx = int(num_str) - 1  # Convert to 0-based index
+                    if 0 <= idx < len(categories):
+                        selected_categories.append(categories[idx].get('category', ''))
+                except ValueError:
+                    pass
+            
+            if selected_categories:
+                return ", ".join(selected_categories)
+    
+    # If input contains category names directly, extract them
+    # Common category names to look for
+    common_categories = ["eat", "sightsee", "shop", "entertainment", "relax", "outdoor", "cultural", "dining", "hiking", "skiing", "adventure"]
+    
+    found_categories = []
+    for cat in common_categories:
+        if cat in user_input:
+            found_categories.append(cat)
+    
+    if found_categories:
+        return ", ".join(found_categories)
+    
+    # If we can't parse it, return the original input (AI will try to interpret it)
+    return user_input
+
 def finalize_activity_list(original_request: str, user_preferences: str, location: str, budget: str, start_time: str, end_time: str, transaction_data: Optional[Dict] = None) -> dict:
     """Create finalized activity list based on user preferences and transaction history"""
     try:
@@ -451,26 +638,145 @@ def finalize_activity_list(original_request: str, user_preferences: str, locatio
             categories = transaction_data.get("activity_categories", [])
             transaction_context = f"\nUser's past activity preferences (from transaction history): {', '.join(inferred)}\nPreferred activity categories: {', '.join(categories)}\nUse these preferences to personalize the activity list."
         
-        response = client.chat.completions.create(
-            model="asi1-mini",
-            messages=[
-                {"role": "system", "content": FINALIZE_PROMPT.format(
-                    original_request=original_request,
-                    user_preferences=user_preferences,
-                    location=location,
-                    budget=budget,
-                    start_time=start_time,
-                    end_time=end_time,
-                    transaction_context=transaction_context
-                )},
-                {"role": "user", "content": "Create the finalized activity list"},
-            ],
-            max_tokens=800,
-        )
-        result = safe_json_parse(response.choices[0].message.content)
+        try:
+            response = client.chat.completions.create(
+                model="asi1-mini",
+                messages=[
+                    {"role": "system", "content": FINALIZE_PROMPT.format(
+                        original_request=original_request,
+                        user_preferences=user_preferences,
+                        location=location,
+                        budget=budget,
+                        start_time=start_time,
+                        end_time=end_time,
+                        transaction_context=transaction_context
+                    )},
+                    {"role": "user", "content": "Create the finalized activity list. Return ONLY valid JSON with no additional text."},
+                ],
+                max_tokens=1200,  # Increased to prevent truncation
+                temperature=0.3,  # Lower temperature for more consistent JSON output
+            )
+            content = response.choices[0].message.content
+            finish_reason = response.choices[0].finish_reason
+            
+            # Check if response was truncated
+            if finish_reason == "length":
+                print(f"Warning: AI response was truncated (finish_reason=length). Content: {content[:200]}...")
+            
+            if not content:
+                print("Finalization error: Empty response from AI")
+                # Fall through to fallback logic below
+                result = None
+            else:
+                # Log the raw content for debugging (first 500 chars)
+                print(f"Finalization response (first 500 chars): {content[:500]}")
+                
+                result = safe_json_parse(content)
+                
+                # Validate that we got the required fields
+                if not result or not isinstance(result, dict):
+                    print(f"Finalization error: Invalid response structure. Full content: {content}")
+                    print(f"Parsed result: {result}")
+                    result = None
+        except Exception as api_error:
+            print(f"API call error: {api_error}")
+            import traceback
+            print(traceback.format_exc())
+            result = None
+        
+        # If API call failed or returned invalid result, use fallback
+        if result is None:
+            print("Using fallback: Creating activity_list directly from user preferences")
+            # Extract categories from user preferences
+            import re
+            category_keywords = {
+                "eat": ["eat", "dining", "food", "restaurant", "cafe", "meal"],
+                "sightsee": ["sightsee", "sightseeing", "landmark", "monument", "museum", "view", "attraction"],
+                "shop": ["shop", "shopping", "market", "boutique", "store", "mall"],
+                "entertainment": ["entertainment", "show", "concert", "nightlife", "bar", "club", "theater"],
+                "outdoor": ["outdoor", "hiking", "park", "nature", "walk"],
+                "cultural": ["cultural", "culture", "art", "gallery", "history", "historic"]
+            }
+            
+            user_pref_lower = user_preferences.lower()
+            extracted_categories = []
+            for category, keywords in category_keywords.items():
+                if any(keyword in user_pref_lower for keyword in keywords):
+                    extracted_categories.append(category)
+            
+            # If we couldn't extract, use defaults
+            if not extracted_categories:
+                extracted_categories = ["eat", "sightsee"]
+            
+            result = {
+                "activity_list": extracted_categories,
+                "constraints": {
+                    "budget": float(budget) if budget and budget != "null" and budget.lower() != "none" else None,
+                    "start_time": start_time if start_time and start_time != "null" else None,
+                    "end_time": end_time if end_time and end_time != "null" else None,
+                    "location": location,
+                    "preferences": user_preferences.split(", ") if user_preferences else []
+                },
+                "agents_to_call": [],
+                "notes": f"Activity list created from user preferences: {', '.join(extracted_categories)}"
+            }
+            print(f"Fallback result: {result}")
+        
+        # Ensure required fields exist
+        if "activity_list" not in result:
+            print(f"Finalization error: Missing activity_list in response.")
+            # Try to create a minimal valid response
+            result["activity_list"] = []
+        
+        # Validate that activity_list is not empty
+        if not result.get("activity_list") or len(result.get("activity_list", [])) == 0:
+            print(f"Warning: activity_list is empty. Attempting to extract from user preferences: {user_preferences}")
+            # Try to extract categories from user preferences as fallback
+            import re
+            # Look for common category names in user_preferences
+            category_keywords = {
+                "eat": ["eat", "dining", "food", "restaurant", "cafe"],
+                "sightsee": ["sightsee", "sightseeing", "landmark", "monument", "museum"],
+                "shop": ["shop", "shopping", "market", "boutique"],
+                "entertainment": ["entertainment", "show", "concert", "nightlife"],
+                "outdoor": ["outdoor", "hiking", "park", "nature"],
+                "cultural": ["cultural", "culture", "art", "gallery"]
+            }
+            
+            user_pref_lower = user_preferences.lower()
+            extracted_categories = []
+            for category, keywords in category_keywords.items():
+                if any(keyword in user_pref_lower for keyword in keywords):
+                    extracted_categories.append(category)
+            
+            if extracted_categories:
+                result["activity_list"] = extracted_categories
+                print(f"Extracted activity_list from preferences: {extracted_categories}")
+            else:
+                # Last resort: use default categories based on common preferences
+                result["activity_list"] = ["eat", "sightsee"]
+                print(f"Using default activity_list: {result['activity_list']}")
+        
+        if "constraints" not in result:
+            result["constraints"] = {}
+        
+        if "agents_to_call" not in result:
+            result["agents_to_call"] = []
+        
+        if "notes" not in result:
+            result["notes"] = "Activity list finalized"
+        
+        # Final validation: ensure activity_list is not empty
+        if not result.get("activity_list") or len(result.get("activity_list", [])) == 0:
+            print("ERROR: activity_list is still empty after all attempts. Setting default.")
+            result["activity_list"] = ["eat", "sightsee"]
+        
+        print(f"Final activity_list: {result.get('activity_list')}")
         return result
     except Exception as e:
         print(f"Finalization error: {e}")
+        import traceback
+        print(traceback.format_exc())
         return None
 
 def dispatch_intent(user_request: str, sender: str, conversation_state: Optional[Dict] = None) -> Dict:
@@ -504,7 +810,12 @@ def dispatch_intent(user_request: str, sender: str, conversation_state: Optional
         if conversation_state and conversation_state.get("waiting_for_clarification"):
             # STEP 2: User has responded with their preference selections
             # Parse their response (could be "1, 3, 5" or "eat, sightsee" or category names)
-            user_preferences = user_request
+            categories = conversation_state.get("categories", [])
+            parsed_preferences = parse_user_preferences(user_request, categories)
+            
+            # Use parsed preferences, or fall back to original if parsing didn't work
+            user_preferences = parsed_preferences if parsed_preferences else user_request
+            
             original_request = conversation_state.get("original_request", "")
             location = conversation_state.get("location", "")
             budget = conversation_state.get("budget", "null")
@@ -514,6 +825,8 @@ def dispatch_intent(user_request: str, sender: str, conversation_state: Optional
             transaction_data = None
             if conversation_state.get("transaction_data"):
                 transaction_data = conversation_state.get("transaction_data")
+            
+            print(f"Parsed user preferences: {user_preferences} (from input: {user_request})")
             
             # STEP 3: Create final activity list with GENERAL categories (eat, sightsee, etc.)
             dispatch_plan = finalize_activity_list(
@@ -533,15 +846,34 @@ def dispatch_intent(user_request: str, sender: str, conversation_state: Optional
         is_vague = vagueness_result.get("is_vague", False)
         location = vagueness_result.get("location")
         
+        # Ensure user_request is a string before string operations
+        if not isinstance(user_request, str):
+            user_request = str(user_request)
+        
+        # Check if request mentions specific activity types (not vague if activities are specified)
+        activity_keywords = ["eat", "dining", "sightsee", "sightseeing", "shop", "shopping", "entertainment", 
+                            "museum", "gallery", "park", "adventure", "outdoor", "cultural", "relax", "spa"]
+        has_activities = any(keyword in user_request.lower() for keyword in activity_keywords)
+        
+        # If activities are specified, override the vagueness check - request is NOT vague
+        if has_activities:
+            is_vague = False
+            print(f"Request has activities specified, overriding vagueness check - not vague")
+        
         # Also check if this looks like a general planning request (contains words like "plan", "itinerary", "day in")
         is_planning_request = any(word in user_request.lower() for word in ["plan", "itinerary", "day in", "visit", "trip to"])
         
-        # Treat as vague if: explicitly marked vague OR (has location AND looks like general planning request)
-        if is_vague or (location and is_planning_request):
+        # Treat as vague if: explicitly marked vague OR (has location AND looks like general planning request AND no activities)
+        if is_vague or (location and is_planning_request and not has_activities):
             # REQUEST IS VAGUE - Need to gather more information
             # If location wasn't extracted, try to extract it from text
             if not location:
                 import re
+                # Ensure user_request is a string before using regex
+                if isinstance(user_request, dict):
+                    user_request = str(user_request)
+                elif not isinstance(user_request, str):
+                    user_request = str(user_request)
                 # Try to find location patterns like "in New York", "visit Paris", "trip to Tokyo"
                 location_match = re.search(r'\b(?:in|at|to|visit|trip to|going to)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)', user_request, re.IGNORECASE)
                 if location_match:
