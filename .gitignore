@@ -9,9 +9,11 @@ Frontend/node_modules/
 # testing
 /coverage
 
-# next.js
-/.next/
+# next.js (build output – do not commit)
+.next/
+Frontend/.next/
 /out/
+Frontend/out/
 
 /venv/
 
@@ -27,9 +29,13 @@ npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 
-# local env files
-.env*.local
+# local env (never commit secrets)
 .env
+.env.local
+.env*.local
+Frontend/.env
+Frontend/.env.local
+Frontend/.env*.local
 
 # vercel
 .vercel
