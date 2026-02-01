@@ -4,6 +4,7 @@ import React, { useState, useMemo, useCallback, useRef, useEffect } from 'react'
 import { motion, AnimatePresence } from 'framer-motion';
 import Map from 'react-map-gl/mapbox';
 import { Marker, Source, Layer } from 'react-map-gl/mapbox';
+import type { MapRef } from 'react-map-gl/mapbox';
 import { ShieldCheck, Sparkles, MapPin, ArrowUp, X, Sun, Moon, Check } from 'lucide-react';
 import insightsData from '@/data/insights.json';
 import 'mapbox-gl/dist/mapbox-gl.css';
@@ -175,8 +176,8 @@ const ItineraryCard = React.memo(function ItineraryCard_({
         isHighlighted ? 'card-highlight-pulse ring-2 ring-visa-blue ring-offset-2' : ''
       }`}
     >
-      <div className="flex items-center gap-2 mb-3 shrink-0">
-        <div className={`shrink-0 rounded-full flex items-center justify-center ${
+      <div className="relative flex items-center gap-2 mb-3 shrink-0 pl-8">
+        <div className={`absolute left-[12px] top-0.75 shrink-0 rounded-full flex items-center justify-center ${
           isSelected ? 'w-6 h-6 bg-visa-gold text-slate-900' : 'w-3 h-3 bg-visa-blue'
         }`} aria-hidden>
           {isSelected && <Check className="w-3.5 h-3.5" strokeWidth={3} />}
@@ -230,6 +231,7 @@ export default function VICAppleMapsDemo() {
   const [displayMode, setDisplayMode] = useState<DisplayMode>('single');
   const [activeItineraryIndex, setActiveItineraryIndex] = useState(0);
   const dragRef = useRef({ isDragging: false, startY: 0, startPercent: 0 });
+  const mapRef = useRef<MapRef | null>(null);
 
   const recommendations = useMemo(() => flattenRecommendations(itinerariesData), []);
 
@@ -267,6 +269,29 @@ export default function VICAppleMapsDemo() {
   useEffect(() => {
     setSelectedIds([]);
   }, [displayMode, activeItineraryIndex]);
+
+  // Global map auto-bounding: fit visible pins when mode or itinerary group changes
+  useEffect(() => {
+    if (viewState !== 'RESULTS' || !hasMapboxToken || !mapRef.current) return;
+    const coords = itemsForView.map((r) => getCoords(r)).filter((c): c is [number, number] => c !== null);
+    if (coords.length === 0) return;
+    const lngs = coords.map((c) => c[0]);
+    const lats = coords.map((c) => c[1]);
+    let minLng = Math.min(...lngs);
+    let maxLng = Math.max(...lngs);
+    let minLat = Math.min(...lats);
+    let maxLat = Math.max(...lats);
+    if (coords.length === 1) {
+      const delta = 0.002;
+      minLng -= delta; maxLng += delta; minLat -= delta; maxLat += delta;
+    }
+    const map = mapRef.current.getMap();
+    if (!map) return;
+    map.fitBounds(
+      [[minLng, minLat], [maxLng, maxLat]],
+      { padding: { top: 50, bottom: 300, left: 50, right: 50 }, duration: 1000 }
+    );
+  }, [viewState, displayMode, activeItineraryIndex, itemsForView, hasMapboxToken]);
 
   const handleSearch = useCallback(() => {
     if (!chatInput.trim()) return;
@@ -383,6 +408,7 @@ export default function VICAppleMapsDemo() {
       <div className="absolute inset-0 w-full h-[100dvh] min-h-[100dvh]">
         {hasMapboxToken ? (
           <Map
+            ref={mapRef}
             mapboxAccessToken={MAPBOX_ACCESS_TOKEN}
             initialViewState={BROWN_VIEWPORT}
             mapStyle={mapStyle}
@@ -706,9 +732,7 @@ export default function VICAppleMapsDemo() {
                       </p>
                     ) : (
                       <>
-                        <div className="relative grid grid-cols-1 md:grid-cols-3 gap-x-8 gap-y-12 items-stretch">
-                          {/* Vertical timeline rail: visible on mobile only, centered behind 12px blue dots (dot center at 30px with p-6) */}
-                          <div className="absolute left-[30px] top-0 bottom-0 w-0.5 bg-slate-200 dark:bg-slate-600 pointer-events-none md:hidden" aria-hidden />
+                        <div className="relative grid grid-cols-1 md:grid-cols-3 gap-x-8 gap-y-12 items-stretch before:absolute before:left-[19px] before:top-0 before:bottom-0 before:w-[2px] before:bg-slate-200 before:dark:bg-slate-600 before:content-[''] md:before:hidden">
                           {activeGroupItems.map((rec) => (
                             <ItineraryCard
                               key={rec.id}
@@ -723,7 +747,7 @@ export default function VICAppleMapsDemo() {
                             />
                           ))}
                         </div>
-                        <div className={`pt-6 border-t ${drawerBorder}`}>
+                        <div className={`mt-12 pt-6 border-t ${drawerBorder}`}>
                           <button
                             type="button"
                             onClick={handleAuthorizeFullItinerary}
