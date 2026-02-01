@@ -25,15 +25,15 @@ Utilizing Fetch.ai, we were able to relegate tasks such as organizing a user's h
 3. We tried using Eventbrite, OpenRestaurant, and DoorDash to book restaurants, find tickets, and other activities but we needed to partner with them to get the API key so we had to look for other options.
 4. Because we legally can’t make the bot automatically enter card details, we've identified Stripe as our only legal option. 
 
-
 # Accomplishments we're proud of
 
+We are very proud of what we've accomplished at Hack at Brown! While our project is currently a demo for how Agentic AI can be used to participate in the VISA community, we take great pride in knowing that our product serves as a valuable pilot run for many features that VISA is currently exploring and developing in their VAS and PPD wings. 
 
-#whats next for ___insert name here____?
+# What we learned 
 
-
-We are very proud of what we've accomplished at HackBrown! While our project is currently a demo for how Agentic AI can be used to participate in the community, we would love the opportunity to creata a fully fleshed out product in the future
 
 # Roadmap
  later down the line, we’ll be able to grow our solution by using the Intelligent Commerce API, which would allow us to properly perform the transactions.
+
+ 
 
