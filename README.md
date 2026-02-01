@@ -19,7 +19,7 @@ Utilizing Fetchai, we were able to relegate tasks such as organizing a user's ho
 
 # Challenges we ran into
 
-Our biggest challenge was that since the virtual intelligence APi has not been released uet, we tasked ourselves with replicating some of the features it could have provided to use such as _______
+Our biggest challenge was that we had to pivot our idea since the API reflected our initial idea that we'd fully built our plan around. 
 
 # accomplishments we're proud of
 
@@ -28,4 +28,7 @@ Our biggest challenge was that since the virtual intelligence APi has not been r
 
 
 While we are proud of what we were able to accomplish, we were held back by the fact that we did not have access to the APi.
+
+# Roadmap
+ later down the line, we’ll be able to grow our solution by using the Intelligent Commerce API, which would allow us to properly perform the transactions.
 
