@@ -52,6 +52,20 @@ const RECOMMENDATION_COORDINATES: Record<string, [number, number]> = {
   'rec-1': [-71.396, 41.848],
   'rec-2': [-71.4002, 41.8275],
   'rec-3': [-71.403, 41.826],
+  'anchor-starbucks': [-71.4103, 41.8245],
+};
+
+/** Anchor location: always first result (Impromptu and Itinerary). */
+const ANCHOR_LOCATION: Recommendation = {
+  id: 'anchor-starbucks',
+  title: 'Starbucks',
+  cost: '$6.50',
+  address: '1 Financial Plaza, Providence, RI 02903',
+  coordinates: [-71.4103, 41.8245],
+  agent_reasoning: 'Strategically located at Financial Plaza, this Starbucks is a Visa Digital-First partner. Perfect for a secure, frictionless start to your Providence journey.',
+  score: '99',
+  startTime: '08:00',
+  endTime: '09:00',
 };
 
 function parseCost(costStr: string): number {
@@ -95,6 +109,8 @@ function flattenRecommendations(groups: ItineraryGroup[]): Recommendation[] {
   return out;
 }
 
+const READ_MORE_THRESHOLD = 100;
+
 /** Memoized Impromptu card to avoid re-renders when dragging drawer */
 const ImpromptuCard = React.memo(function ImpromptuCard_({
   rec,
@@ -115,6 +131,10 @@ const ImpromptuCard = React.memo(function ImpromptuCard_({
   isDarkMode: boolean;
   onAuthorize: (id: string) => void;
 }) {
+  const text = rec.agent_reasoning ?? 'Part of your curated experience.';
+  const showReadMore = text.length > READ_MORE_THRESHOLD;
+  const [expanded, setExpanded] = React.useState(false);
+
   return (
     <article
       id={`card-${rec.id}`}
@@ -134,7 +154,16 @@ const ImpromptuCard = React.memo(function ImpromptuCard_({
           <span className={`font-price font-bold text-sm md:text-base ${drawerText}`}>{rec.cost}</span>
         </div>
         <h4 className={`font-heading font-bold text-sm md:text-lg ${drawerText} mb-1`}>{rec.title}</h4>
-        <p className={`font-sans text-[11px] md:text-sm mb-3 md:mb-4 ${drawerMuted} line-clamp-3 flex-grow min-h-0`}>{rec.agent_reasoning ?? 'Part of your curated experience.'}</p>
+        <p className={`font-sans text-[11px] md:text-sm mb-1 ${drawerMuted} flex-grow min-h-0 ${expanded ? '' : 'line-clamp-2'} ${!showReadMore ? 'mb-3 md:mb-4' : ''}`}>{text}</p>
+        {showReadMore && (
+          <button
+            type="button"
+            onClick={() => setExpanded((e) => !e)}
+            className={`font-sans font-medium text-[11px] md:text-xs mt-0.5 text-left mb-3 md:mb-4 ${drawerMuted} hover:underline focus:outline-none`}
+          >
+            {expanded ? 'Show less' : '…read more'}
+          </button>
+        )}
       </div>
       <button
         type="button"
@@ -170,14 +199,18 @@ const ItineraryCard = React.memo(function ItineraryCard_({
   isDarkMode: boolean;
   onAuthorize: (id: string) => void;
 }) {
+  const text = rec.agent_reasoning ?? 'Part of this itinerary.';
+  const showReadMore = text.length > READ_MORE_THRESHOLD;
+  const [expanded, setExpanded] = React.useState(false);
+
   return (
     <article
       id={`card-${rec.id}`}
       className={`flex flex-col h-full min-h-0 border rounded-2xl p-6 shadow-sm scroll-mt-4 transition-shadow min-w-0 ${cardBg} ${isHighlighted ? 'card-highlight-pulse ring-2 ring-visa-blue ring-offset-2' : ''
         }`}
     >
-      <div className="relative flex items-center gap-2 mb-3 shrink-0 pl-8">
-        <div className={`absolute left-[12px] top-0.75 shrink-0 rounded-full flex items-center justify-center ${isSelected ? 'w-6 h-6 bg-visa-gold text-slate-900' : 'w-3 h-3 bg-visa-blue'
+      <div className="relative flex items-center gap-2 mb-3 shrink-0 pl-12">
+        <div className={`absolute left-[10px] top-0.75 shrink-0 rounded-full flex items-center justify-center z-10 ${isSelected ? 'w-6 h-6 bg-visa-gold text-slate-900 border-2 border-white shadow-sm' : 'w-3 h-3 bg-visa-blue'
           }`} aria-hidden>
           {isSelected && <Check className="w-3.5 h-3.5" strokeWidth={3} />}
         </div>
@@ -200,7 +233,16 @@ const ItineraryCard = React.memo(function ItineraryCard_({
           </span>
         </div>
         <h4 className={`font-heading font-bold text-sm md:text-base ${drawerText} mb-1`}>{rec.title}</h4>
-        <p className={`font-sans text-[11px] md:text-sm ${drawerMuted} line-clamp-3 flex-grow min-h-0`}>{rec.agent_reasoning ?? 'Part of this itinerary.'}</p>
+        <p className={`font-sans text-[11px] md:text-sm ${drawerMuted} flex-grow min-h-0 ${expanded ? '' : 'line-clamp-2'}`}>{text}</p>
+        {showReadMore && (
+          <button
+            type="button"
+            onClick={() => setExpanded((e) => !e)}
+            className={`font-sans font-medium text-[11px] md:text-xs mt-0.5 text-left ${drawerMuted} hover:underline focus:outline-none`}
+          >
+            {expanded ? 'Show less' : '…read more'}
+          </button>
+        )}
       </div>
       <div className="mt-auto min-h-6 shrink-0" aria-hidden />
       <div className="shrink-0">
@@ -219,7 +261,7 @@ const ItineraryCard = React.memo(function ItineraryCard_({
   );
 });
 
-export default function VICAppleMapsDemo() {
+export default function HelpingHandApp() {
   const [viewState, setViewState] = useState<ViewState>('IDLE');
   const [chatInput, setChatInput] = useState('');
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
@@ -250,23 +292,27 @@ export default function VICAppleMapsDemo() {
     }).sort();
   }, []);
 
-  // Use API recommendations if available, otherwise fall back to static data
+  // Use API recommendations if available, otherwise fall back to static data. Anchor Starbucks is always first.
   const recommendations = useMemo(() => {
-    if (apiRecommendations.length > 0) {
-      return apiRecommendations;
-    }
-    return flattenRecommendations(itinerariesData);
+    const base = apiRecommendations.length > 0
+      ? apiRecommendations.filter((r) => r.id !== ANCHOR_LOCATION.id)
+      : flattenRecommendations(itinerariesData).filter((r) => r.id !== ANCHOR_LOCATION.id);
+    return [ANCHOR_LOCATION, ...base];
   }, [apiRecommendations]);
 
-  // Create itinerary groups from API data or static data
+  // Create itinerary groups from API data or static data. Anchor Starbucks is always first in each group.
   const itineraryGroups = useMemo(() => {
     if (apiRecommendations.length > 0) {
+      const rest = apiRecommendations.filter((r) => r.id !== ANCHOR_LOCATION.id);
       return [{
         group_name: `${location} Itinerary`,
-        items: apiRecommendations
+        items: [ANCHOR_LOCATION, ...rest]
       }];
     }
-    return itinerariesData;
+    return itinerariesData.map((g) => ({
+      ...g,
+      items: [ANCHOR_LOCATION, ...g.items.filter((r) => r.id !== ANCHOR_LOCATION.id)]
+    }));
   }, [apiRecommendations, location]);
 
   const activeGroupItems = useMemo(() => {
@@ -311,10 +357,24 @@ export default function VICAppleMapsDemo() {
     setSelectedIds([]);
   }, [displayMode, activeItineraryIndex]);
 
-  // Global map auto-bounding: fit visible pins when mode or itinerary group changes
+  // Coords used for fitBounds: when 2+ selected, fit to selection path; otherwise all visible pins
+  const coordsForFitBounds = useMemo(() => {
+    const selected = itemsForView
+      .filter((r) => selectedIds.includes(r.id))
+      .slice()
+      .sort((a, b) => {
+        const sa = a.startTime ? parseTimeToMinutes(a.startTime) : 0;
+        const sb = b.startTime ? parseTimeToMinutes(b.startTime) : 0;
+        return sa - sb;
+      });
+    const source = selected.length >= 2 ? selected : itemsForView;
+    return source.map((r) => getCoords(r)).filter((c): c is [number, number] => c !== null);
+  }, [itemsForView, selectedIds]);
+
+  // Global map auto-bounding: fit to selection path when 2+ selected, else all pins
   useEffect(() => {
     if (viewState !== 'RESULTS' || !hasMapboxToken || !mapRef.current) return;
-    const coords = itemsForView.map((r) => getCoords(r)).filter((c): c is [number, number] => c !== null);
+    const coords = coordsForFitBounds;
     if (coords.length === 0) return;
     const lngs = coords.map((c) => c[0]);
     const lats = coords.map((c) => c[1]);
@@ -330,9 +390,9 @@ export default function VICAppleMapsDemo() {
     if (!map) return;
     map.fitBounds(
       [[minLng, minLat], [maxLng, maxLat]],
-      { padding: { top: 50, bottom: 300, left: 50, right: 50 }, duration: 1000 }
+      { padding: { top: 50, bottom: 350, left: 50, right: 50 }, duration: 800 }
     );
-  }, [viewState, displayMode, activeItineraryIndex, itemsForView, hasMapboxToken]);
+  }, [viewState, displayMode, activeItineraryIndex, coordsForFitBounds, hasMapboxToken]);
 
   // Geocode address using Mapbox
   const geocodeAddress = useCallback(async (address: string): Promise<[number, number] | null> => {
@@ -456,51 +516,38 @@ export default function VICAppleMapsDemo() {
     setViewState('THINKING');
 
     try {
-      // Convert local datetime to ISO 8601
       const startTimeISO = new Date(startTime).toISOString();
       const endTimeISO = new Date(endTime).toISOString();
-
-      // Call bridge server API
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 10000);
       const response = await fetch('http://localhost:8005/api/schedule', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           user_request: chatInput,
-          location: location,
+          location,
           start_time: startTimeISO,
-          end_time: endTimeISO
-        })
+          end_time: endTimeISO,
+        }),
+        signal: controller.signal,
       });
-
-      if (!response.ok) {
-        throw new Error(`API error: ${response.statusText}`);
-      }
-
+      clearTimeout(timeoutId);
+      if (!response.ok) throw new Error(`API error: ${response.statusText}`);
       const result = await response.json();
-
-      if (!result.success) {
-        throw new Error(result.error || 'Unknown error');
-      }
-
-      // Transform response
-      const { recommendations, transitInfo: transit } = await transformBackendResponse(result.data);
-      setApiRecommendations(recommendations);
-      setTransitInfo(transit);
-
-      // Set budget from API response
-      if (result.data?.budget) {
-        setApiBudget(result.data.budget);
-      }
-
-      // Create itinerary group from transformed data
-      if (recommendations.length > 0) {
+      if (!result.success) throw new Error(result.error || 'Unknown error');
+      const { recommendations, transitInfo } = await transformBackendResponse(result.data);
+      const rest = recommendations.filter((r) => r.id !== ANCHOR_LOCATION.id);
+      const recs = [ANCHOR_LOCATION, ...rest];
+      setApiRecommendations(recs);
+      setTransitInfo(transitInfo);
+      setApiBudget(result.data?.budget ?? null);
+      setError(null);
+      if (recs.length > 0) {
         setViewState('RESULTS');
       } else {
-        throw new Error('No activities found');
+        setError('No activities found');
+        setViewState('IDLE');
       }
-
     } catch (err) {
       console.error('Search error:', err);
       setError(err instanceof Error ? err.message : 'Failed to create schedule');
@@ -527,18 +574,25 @@ export default function VICAppleMapsDemo() {
     });
   }, [activeGroupItems]);
 
-  const itineraryLineGeoJSON = useMemo(() => {
-    if (displayMode !== 'itinerary' || activeGroupItems.length < 2) return null;
-    const coords = activeGroupItems
-      .map((r) => getCoords(r))
-      .filter((c): c is [number, number] => c !== null);
+  // Route line only when 2+ items selected: time-sorted path (e.g. 08:00 Starbucks → next selected)
+  const selectionPathGeoJSON = useMemo(() => {
+    const selected = itemsForView
+      .filter((r) => selectedIds.includes(r.id))
+      .slice()
+      .sort((a, b) => {
+        const sa = a.startTime ? parseTimeToMinutes(a.startTime) : 0;
+        const sb = b.startTime ? parseTimeToMinutes(b.startTime) : 0;
+        return sa - sb;
+      });
+    if (selected.length < 2) return null;
+    const coords = selected.map((r) => getCoords(r)).filter((c): c is [number, number] => c !== null);
     if (coords.length < 2) return null;
     return {
       type: 'Feature' as const,
       properties: {},
       geometry: { type: 'LineString' as const, coordinates: coords },
     };
-  }, [displayMode, activeGroupItems]);
+  }, [itemsForView, selectedIds]);
 
   const [highlightedCardId, setHighlightedCardId] = useState<string | null>(null);
 
@@ -581,14 +635,14 @@ export default function VICAppleMapsDemo() {
             style={{ width: '100%', height: '100%' }}
             reuseMaps
           >
-            {viewState === 'RESULTS' && itineraryLineGeoJSON && (
-              <Source id="itinerary-route" type="geojson" data={itineraryLineGeoJSON}>
+            {viewState === 'RESULTS' && selectionPathGeoJSON && (
+              <Source id="selection-path" type="geojson" data={selectionPathGeoJSON}>
                 <Layer
-                  id="itinerary-route-line"
+                  id="selection-path-line"
                   type="line"
                   paint={{
-                    'line-color': '#003399',
-                    'line-width': 3,
+                    'line-color': '#F7B600',
+                    'line-width': 4,
                     'line-dasharray': [2, 2],
                   }}
                 />
@@ -599,6 +653,7 @@ export default function VICAppleMapsDemo() {
                 const coords = getCoords(rec);
                 if (!coords) return null;
                 const [longitude, latitude] = coords;
+                const isSelected = selectedIds.includes(rec.id);
                 return (
                   <Marker
                     key={rec.id}
@@ -607,14 +662,22 @@ export default function VICAppleMapsDemo() {
                     anchor="bottom"
                     onClick={() => scrollToCard(rec.id)}
                   >
-                    <button
-                      type="button"
-                      className="w-8 h-8 rounded-full border-2 border-white shadow-lg flex items-center justify-center hover:scale-110 active:scale-95 transition-transform focus:outline-none focus:ring-2 focus:ring-visa-gold focus:ring-offset-2 cursor-pointer"
-                      style={{ backgroundColor: '#003399' }}
-                      aria-label={`Go to ${rec.title}`}
-                    >
-                      <MapPin className="w-3.5 h-3.5 text-white" />
-                    </button>
+                    <div className="flex flex-col items-center cursor-pointer">
+                      <button
+                        type="button"
+                        className="w-8 h-8 rounded-full border-2 border-white shadow-lg flex items-center justify-center hover:scale-110 active:scale-95 transition-transform focus:outline-none focus:ring-2 focus:ring-visa-gold focus:ring-offset-2"
+                        style={{ backgroundColor: isSelected ? '#F7B600' : '#003399' }}
+                        aria-label={`Go to ${rec.title}`}
+                      >
+                        <MapPin className={`w-3.5 h-3.5 ${isSelected ? 'text-slate-900' : 'text-white'}`} />
+                      </button>
+                      <span
+                        className="font-sans text-[10px] font-medium whitespace-nowrap mt-0.5 text-white"
+                        style={{ textShadow: '0 0 2px #000, 0 0 3px #000, 0 1px 2px #000' }}
+                      >
+                        {rec.title}
+                      </span>
+                    </div>
                   </Marker>
                 );
               })
@@ -658,9 +721,9 @@ export default function VICAppleMapsDemo() {
                 <Sparkles className="w-4 h-4 text-white" />
               </div>
               <div>
-                <h2 className="font-heading text-sm font-bold leading-none tracking-tight">VIC Agent</h2>
+                <h2 className="font-heading text-sm font-bold leading-none tracking-tight">Helping Hand</h2>
                 <p className={`font-heading text-[10px] font-bold uppercase tracking-tight ${drawerMuted}`}>
-                  Powered by Visa Intelligence
+                  Helping Hand — Powered by Visa Intelligence
                 </p>
               </div>
             </div>
@@ -811,9 +874,9 @@ export default function VICAppleMapsDemo() {
                   <Sparkles className="w-4 h-4 text-white" />
                 </div>
                 <div>
-                  <h2 className="font-heading text-sm font-bold leading-none tracking-tight">VIC Agent</h2>
+                  <h2 className="font-heading text-sm font-bold leading-none tracking-tight">Helping Hand</h2>
                   <p className={`font-heading text-[10px] font-bold uppercase tracking-tight ${drawerMuted}`}>
-                    Powered by Visa Intelligence
+                    Helping Hand — Powered by Visa Intelligence
                   </p>
                 </div>
               </div>
@@ -935,7 +998,7 @@ export default function VICAppleMapsDemo() {
                   ))}
                 </div>
               ) : (
-                <div className="w-full">
+                <div className="w-full pl-2">
                   {activeGroupItems.length === 0 ? (
                     <p className={`font-sans py-8 text-center text-sm ${drawerMuted}`}>
                       No stops in this itinerary.
