@@ -69,6 +69,8 @@ client = OpenAI(
 ACTIVITY_SCRAPER_PROMPT = """
 You are an expert travel researcher and activity curator. Your job is to RESEARCH and find REAL, SPECIFIC venues and activities in the given location.
 
+RULE: When the user's prompt says a location (e.g. Providence, Providence RI, Rhode Island, Toronto, New York), all results MUST be based on that location only. Never return venues from a different city.
+
 CRITICAL REQUIREMENTS:
 1. You MUST research the actual location and find REAL venues that exist there. Do NOT make up or guess venues.
 2. Return SPECIFIC, REAL venues - not generic activities. Examples:
@@ -79,7 +81,8 @@ CRITICAL REQUIREMENTS:
 
 3. ALL addresses MUST be REAL, VERIFIABLE addresses in the specified location. Research actual street addresses.
    Format: "Street Number Street Name, City, State ZIP" or "Street Number Street Name, City, Country"
-   Example: "350 5th Ave, New York, NY 10118" or "100 Queen St W, Toronto, ON M5H 2N2"
+   Example: "350 5th Ave, New York, NY 10118" or "100 Atwells Ave, Providence, RI 02903"
+   CRITICAL: Use ONLY the location given in the request. Never substitute a different city (e.g. if the user asks for Providence RI or Rhode Island, do NOT return venues in Toronto or any other city).
 
 4. Descriptions should be 2-3 sentences describing what makes this specific venue unique, what you can do there, and why it's worth visiting.
 
@@ -108,7 +111,7 @@ Return ONLY valid JSON in this format:
       "duration": "2 hours",
       "best_time": "morning",
       "difficulty": "moderate",
-      "address": "REAL street address in the location (e.g., '350 5th Ave, New York, NY 10118')",
+      "address": "REAL street address in the REQUESTED location only (e.g., '350 5th Ave, New York, NY 10118' or '100 Atwells Ave, Providence, RI 02903')",
       "phone": "+1-555-123-4567",
       "url": "https://real-website.com"
     }}
@@ -180,8 +183,10 @@ User Interests: {interests_str} ({num_interests} categories)
 RESEARCH and find 4-5 SPECIFIC, REAL venues for EACH of these {num_interests} interest categories in {location}.
 This should total approximately {num_interests * 4}-{num_interests * 5} activities (about 4-5 per category).
 
+CRITICAL: Use ONLY the location specified above: "{location}". Do NOT use a different city (e.g. do NOT return Toronto venues when the user asked for Providence RI, Rhode Island, or any other location).
+
 CRITICAL REQUIREMENTS:
-- RESEARCH the location {location} and find REAL venues that actually exist there
+- RESEARCH the location {location} and find REAL venues that actually exist THERE (in {location} only)
 - Return SPECIFIC venues: actual restaurant names, mall names, store names, landmark names - NOT generic activity types
 - For "eat" or "dining": Research and return specific restaurants in {location} like popular chains, local favorites, etc.
 - For "shop": Research and return specific malls, shopping centers, or stores in {location}
@@ -559,7 +564,7 @@ def parse_text_to_json(text: str) -> Dict:
             model="asi1-mini",
             messages=[
                 {"role": "system", "content": """You are a strict JSON converter. Convert the user's natural language request into a JSON object with these REQUIRED fields:
-- location: (string, REQUIRED - city name only, must be a real place)
+- location: (string, REQUIRED - use the EXACT location from the user's request only, e.g. "Providence, RI" or "Rhode Island" - do NOT substitute a different city like Toronto)
 - interest_activities: (array of strings, REQUIRED - must have at least 1 activity like skiing, hiking, dining, sightseeing, adventure)
 - budget: (number, optional - in USD, must be > 0 if provided)
 - timeframe: (string, optional - e.g., "weekend", "3 days")

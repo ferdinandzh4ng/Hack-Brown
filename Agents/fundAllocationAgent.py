@@ -64,6 +64,8 @@ COST_SCRAPER_PROMPT = """
 You are an expert at researching and finding accurate cost information for activities in specific locations.
 Your task is to find realistic, current pricing information for activities based on web research and knowledge.
 
+RULE: When the user's prompt says a location (e.g. Providence, Providence RI, Rhode Island, Toronto), all cost research MUST be for that location only. Never use a different city.
+
 For each activity in the given location, you need to:
 1. Research typical costs for that activity in that location
 2. Consider factors like:
@@ -122,6 +124,7 @@ Total Budget: ${budget}
 Activities to research: {activities_str}
 
 For each of these {len(activities)} activities in {location}, research and provide accurate cost estimates.
+CRITICAL: Use ONLY the location "{location}". Do not use a different city for pricing.
 Consider:
 - Entry fees and admission prices
 - Activity-specific costs (equipment rentals, tickets, etc.)

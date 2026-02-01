@@ -486,7 +486,7 @@ async def send_to_orchestrator(user_request: str, location: str, start_time: str
         # Give agent time to start
         await asyncio.sleep(3)
     
-    # Create request JSON
+    # Create request JSON. Location from the user's prompt must be used as-is downstream; never substitute a different city.
     request_data = {
         "user_request": user_request,
         "location": location,

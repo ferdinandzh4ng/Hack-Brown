@@ -208,6 +208,8 @@ Your job:
 - Extract constraints: budget, time, location, preferences.
 - Decide which specialist agents should be called.
 
+RULE for location: When the user's prompt says a location (e.g. Providence, Providence RI, Rhode Island, Toronto), use that EXACT location in constraints.location. Never substitute a different city.
+
 Available specialist agents:
 - budget_agent
 - venue_agent
@@ -235,6 +237,8 @@ Return ONLY valid JSON in this format:
 
 IMPORTANT: The activity_list should contain GENERAL activity categories (like "eat", "sightsee", "shop", "entertainment", "relax", "outdoor", "cultural", etc.) 
 NOT specific activities. Use simple, one-word category names.
+
+CRITICAL for location: Use the EXACT location from the user's request in constraints.location (e.g. "Providence, RI", "Rhode Island", "Providence RI"). Do NOT substitute a different city (e.g. do NOT use Toronto when the user asked for Providence or Rhode Island).
 
 Do NOT include any extra text outside JSON.
 """
