@@ -14,10 +14,11 @@ from uagents_core.contrib.protocols.chat import (
 from functions import dispatch_intent, IntentRequest
 from datetime import datetime, timezone
 from uuid import uuid4
-from typing import Any, Dict
+from typing import Any, Dict, Optional, Tuple
 from uagents import Model
 import json
 import os
+import re
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -47,6 +48,141 @@ struct_output_client_proto = Protocol(
     name="StructuredOutputClientProtocol", version="0.1.0"
 )
 
+def extract_times_from_text(text: str) -> Tuple[Optional[str], Optional[str]]:
+    """
+    Extract start_time and end_time from user's text prompt.
+    Looks for patterns like:
+    - "from 5pm to 11pm"
+    - "5pm-11pm"
+    - "5:00 PM to 11:00 PM"
+    - "between 5pm and 11pm"
+    - "starting at 5pm until 11pm"
+    - "5pm until 11pm"
+    - "at 5pm" (single time - use as start_time, end_time = start_time + 6 hours)
+    """
+    if not text:
+        return None, None
+    
+    text_lower = text.lower()
+    start_time = None
+    end_time = None
+    
+    # Pattern 1: "from X to Y" or "X to Y" or "X-Y" or "between X and Y"
+    patterns = [
+        r'(?:from|starting at|at)\s+(\d{1,2}(?::\d{2})?\s*(?:am|pm|a\.m\.|p\.m\.)?)\s+(?:to|until|-|and)\s+(\d{1,2}(?::\d{2})?\s*(?:am|pm|a\.m\.|p\.m\.)?)',
+        r'(\d{1,2}(?::\d{2})?\s*(?:am|pm|a\.m\.|p\.m\.)?)\s+(?:to|until|-|and)\s+(\d{1,2}(?::\d{2})?\s*(?:am|pm|a\.m\.|p\.m\.)?)',
+        r'between\s+(\d{1,2}(?::\d{2})?\s*(?:am|pm|a\.m\.|p\.m\.)?)\s+and\s+(\d{1,2}(?::\d{2})?\s*(?:am|pm|a\.m\.|p\.m\.)?)',
+    ]
+    
+    for pattern in patterns:
+        match = re.search(pattern, text_lower, re.IGNORECASE)
+        if match:
+            start_str = match.group(1).strip()
+            end_str = match.group(2).strip()
+            
+            # Normalize time strings
+            start_time = normalize_time_string(start_str)
+            end_time = normalize_time_string(end_str)
+            
+            if start_time and end_time:
+                return start_time, end_time
+    
+    # Pattern 2: Single time mentioned (e.g., "at 5pm")
+    single_time_pattern = r'(?:at|starting at|from)\s+(\d{1,2}(?::\d{2})?\s*(?:am|pm|a\.m\.|p\.m\.)?)'
+    match = re.search(single_time_pattern, text_lower, re.IGNORECASE)
+    if match:
+        start_str = match.group(1).strip()
+        start_time = normalize_time_string(start_str)
+        if start_time:
+            # If only start time is given, assume 6 hours duration
+            end_time = add_hours_to_time(start_time, 6)
+            return start_time, end_time
+    
+    return None, None
+
+def normalize_time_string(time_str: str) -> Optional[str]:
+    """
+    Normalize time string to format like "5pm" or "5:00pm"
+    Returns time in format suitable for constraints (e.g., "5pm", "11pm")
+    """
+    if not time_str:
+        return None
+    
+    # Remove extra spaces
+    time_str = time_str.strip()
+    
+    # Remove periods from a.m./p.m.
+    time_str = re.sub(r'\.', '', time_str)
+    
+    # Extract hour and am/pm
+    match = re.match(r'(\d{1,2})(?::(\d{2}))?\s*(am|pm)', time_str, re.IGNORECASE)
+    if match:
+        hour = int(match.group(1))
+        minute = match.group(2) if match.group(2) else "00"
+        am_pm = match.group(3).lower()
+        
+        # Convert to 24-hour format for easier manipulation
+        if am_pm == 'pm' and hour != 12:
+            hour_24 = hour + 12
+        elif am_pm == 'am' and hour == 12:
+            hour_24 = 0
+        else:
+            hour_24 = hour
+        
+        # Return in simple format like "5pm" or "5:00pm"
+        if minute == "00":
+            return f"{hour}pm" if am_pm == 'pm' else f"{hour}am"
+        else:
+            return f"{hour}:{minute}{am_pm}"
+    
+    return None
+
+def add_hours_to_time(time_str: str, hours: int) -> Optional[str]:
+    """
+    Add hours to a time string and return new time string
+    """
+    if not time_str:
+        return None
+    
+    # Parse time string
+    match = re.match(r'(\d{1,2})(?::(\d{2}))?\s*(am|pm)', time_str, re.IGNORECASE)
+    if not match:
+        return None
+    
+    hour = int(match.group(1))
+    minute = int(match.group(2)) if match.group(2) else 0
+    am_pm = match.group(3).lower()
+    
+    # Convert to 24-hour format
+    if am_pm == 'pm' and hour != 12:
+        hour_24 = hour + 12
+    elif am_pm == 'am' and hour == 12:
+        hour_24 = 0
+    else:
+        hour_24 = hour
+    
+    # Add hours
+    hour_24 = (hour_24 + hours) % 24
+    
+    # Convert back to 12-hour format
+    if hour_24 == 0:
+        new_hour = 12
+        new_am_pm = 'am'
+    elif hour_24 < 12:
+        new_hour = hour_24
+        new_am_pm = 'am'
+    elif hour_24 == 12:
+        new_hour = 12
+        new_am_pm = 'pm'
+    else:
+        new_hour = hour_24 - 12
+        new_am_pm = 'pm'
+    
+    if minute == 0:
+        return f"{new_hour}{new_am_pm}"
+    else:
+        return f"{new_hour}:{minute:02d}{new_am_pm}"
+
 def create_text_chat(text: str, end_session: bool = False) -> ChatMessage:
     content = [TextContent(type="text", text=text)]
     if end_session:
@@ -64,10 +200,22 @@ async def safe_send(ctx: Context, destination: str, message: ChatMessage, max_re
     """
     import asyncio
     
+    # Extract message content for logging
+    msg_content = ""
+    for item in message.content:
+        if hasattr(item, 'text'):
+            msg_content = item.text[:100] if len(item.text) > 100 else item.text
+            break
+    
+    ctx.logger.info(f"Attempting to send message to {destination}")
+    ctx.logger.info(f"Message content preview: {msg_content}...")
+    ctx.logger.info(f"Message ID: {message.msg_id}")
+    
     for attempt in range(max_retries + 1):
         try:
             await ctx.send(destination, message)
-            ctx.logger.info(f"Successfully sent message to {destination}")
+            ctx.logger.info(f"Successfully sent message to {destination} (attempt {attempt + 1})")
+            ctx.logger.info(f"Message should arrive at destination. If not received, check: 1) Agent is online, 2) Mailbox is enabled, 3) Network connectivity")
             return True
         except Exception as e:
             error_msg = str(e).lower()
@@ -91,6 +239,8 @@ async def safe_send(ctx: Context, destination: str, message: ChatMessage, max_re
             else:
                 # Different error, log and return
                 ctx.logger.error(f"Error sending message to {destination}: {e}")
+                import traceback
+                ctx.logger.error(traceback.format_exc())
                 return False
     
     return False
@@ -98,17 +248,14 @@ async def safe_send(ctx: Context, destination: str, message: ChatMessage, max_re
 @chat_proto.on_message(ChatMessage)
 async def handle_message(ctx: Context, sender: str, msg: ChatMessage):
     ctx.logger.info(f"Got a message from {sender}: {msg.content}")
+    ctx.logger.info(f"Current session: {ctx.session}")
+    # Store sender with session AND also store it separately to ensure we can retrieve it
     ctx.storage.set(str(ctx.session), sender)
+    # Also store with a more persistent key in case session changes
+    ctx.storage.set(f"last_sender_{ctx.session}", sender)
     
-    # Send acknowledgement (non-blocking, don't fail if it doesn't work)
-    try:
-        await ctx.send(
-            sender,
-            ChatAcknowledgement(timestamp=datetime.now(timezone.utc), acknowledged_msg_id=msg.msg_id),
-        )
-    except Exception as e:
-        ctx.logger.warning(f"Error sending acknowledgement to {sender}: {e}")
-        # Don't fail the entire message handling if acknowledgement fails
+    # NOTE: Not sending ChatAcknowledgement to avoid interfering with ctx.send_and_receive
+    # The orchestrator uses send_and_receive which can match acknowledgements instead of actual responses
     
     for item in msg.content:
         if isinstance(item, StartSessionContent):
@@ -116,18 +263,50 @@ async def handle_message(ctx: Context, sender: str, msg: ChatMessage):
             continue
         elif isinstance(item, TextContent):
             ctx.logger.info(f"Got a message from {sender}: {item.text}")
+            # Store sender again to ensure it's saved
             ctx.storage.set(str(ctx.session), sender)
+            ctx.storage.set(f"last_sender_{ctx.session}", sender)
+            
+            # Try to parse as JSON with start_time, end_time, location, user_request
+            message_text = item.text
+            try:
+                parsed = json.loads(item.text)
+                if isinstance(parsed, dict) and "user_request" in parsed and "location" in parsed:
+                    # It's the new JSON format
+                    message_text = parsed.get("user_request", "")
+                    location_from_json = parsed.get("location", "")
+                    start_time_from_json = parsed.get("start_time")
+                    end_time_from_json = parsed.get("end_time")
+                    
+                    # Store JSON values for later use
+                    ctx.storage.set(f"json_location_{ctx.session}", location_from_json)
+                    ctx.storage.set(f"json_start_time_{ctx.session}", start_time_from_json)
+                    ctx.storage.set(f"json_end_time_{ctx.session}", end_time_from_json)
+                    
+                    ctx.logger.info(f"Parsed JSON input: location={location_from_json}, start_time={start_time_from_json}, end_time={end_time_from_json}")
+                    ctx.logger.info(f"Using user_request for intent extraction: {message_text}")
+            except (json.JSONDecodeError, ValueError):
+                # Not JSON format, use text as-is
+                pass
             
             # Store the original message text for fallback if structured output fails
             original_message_key = f"original_message_{ctx.session}"
-            ctx.storage.set(original_message_key, item.text)
+            ctx.storage.set(original_message_key, message_text)
             
-            # Use structured output to extract intent parameters
+            # Extract time information from user's text (as fallback if not in JSON)
+            extracted_start_time, extracted_end_time = extract_times_from_text(message_text)
+            if extracted_start_time or extracted_end_time:
+                ctx.logger.info(f"Extracted times from text: start_time={extracted_start_time}, end_time={extracted_end_time}")
+                # Store extracted times for use in structured output response handler
+                ctx.storage.set(f"extracted_start_time_{ctx.session}", extracted_start_time)
+                ctx.storage.set(f"extracted_end_time_{ctx.session}", extracted_end_time)
+            
+            # Use structured output to extract intent parameters from user_request
             try:
                 await ctx.send(
                     AI_AGENT_ADDRESS,
                     StructuredOutputPrompt(
-                        prompt=item.text, 
+                        prompt=message_text, 
                         output_schema=IntentRequest.schema()
                     ),
                 )
@@ -150,11 +329,20 @@ async def handle_structured_output_response(
     ctx: Context, sender: str, msg: StructuredOutputResponse
 ):
     ctx.logger.info(f'Here is the message from structured output {msg.output}')
+    ctx.logger.info(f'Current session when receiving structured output: {ctx.session}')
+    # Try to get session sender - try multiple keys in case session changed
     session_sender = ctx.storage.get(str(ctx.session))
+    if session_sender is None:
+        # Try the alternative key
+        session_sender = ctx.storage.get(f"last_sender_{ctx.session}")
+        ctx.logger.info(f'Session sender not found with primary key, trying alternative: {session_sender}')
+    
+    ctx.logger.info(f'Session sender retrieved from storage: {session_sender}')
     if session_sender is None:
         ctx.logger.error(
             "Discarding message because no session sender found in storage"
         )
+        ctx.logger.error(f"Available storage keys might not include session: {ctx.session}")
         return
     
     if "<UNKNOWN>" in str(msg.output):
@@ -195,16 +383,79 @@ async def handle_structured_output_response(
                 if not user_request:
                     user_request = str(msg.output)
             
-        ctx.logger.info(f'Processing intent request: {user_request}')
+            # Check for JSON values (from JSON input format)
+            json_location = ctx.storage.get(f"json_location_{ctx.session}")
+            json_start_time = ctx.storage.get(f"json_start_time_{ctx.session}")
+            json_end_time = ctx.storage.get(f"json_end_time_{ctx.session}")
+            
+            # Check if we extracted times from the text and use them if structured output didn't provide times
+            extracted_start_time = ctx.storage.get(f"extracted_start_time_{ctx.session}")
+            extracted_end_time = ctx.storage.get(f"extracted_end_time_{ctx.session}")
+            
+            # Prefer JSON values over extracted times
+            start_time_to_use = json_start_time or extracted_start_time
+            end_time_to_use = json_end_time or extracted_end_time
+            
+            # Always use location from JSON input if available (prioritize JSON location)
+            if json_location:
+                # Always add location from JSON to user_request
+                user_request = f"{user_request} (Location: {json_location})"
+                ctx.logger.info(f'Using location from JSON input: {json_location}')
+            
+            # If times were available and not in structured output, add them to user_request
+            if (start_time_to_use or end_time_to_use) and not intent_data.get("start_time") and not intent_data.get("end_time"):
+                ctx.logger.info(f'Using times: start_time={start_time_to_use}, end_time={end_time_to_use}')
+                # Append time information to user_request so dispatch_intent can use it
+                if start_time_to_use and end_time_to_use:
+                    user_request = f"{user_request} (Time: {start_time_to_use} to {end_time_to_use})"
+                elif start_time_to_use:
+                    user_request = f"{user_request} (Start time: {start_time_to_use})"
+            
+            ctx.logger.info(f'Processing intent request: {user_request}')
+            
+            # Get conversation state
+            conversation_state_key = f"conversation_state_{session_sender}"
+            conversation_state = ctx.storage.get(conversation_state_key)
+            
+            # Process intent dispatch
+            result = dispatch_intent(user_request, session_sender, conversation_state)
+            
+            # Check if result is None or invalid
+            if result is None:
+                ctx.logger.error("dispatch_intent returned None, sending error response")
+                error_msg = create_text_chat("Sorry, I encountered an error processing your request. Please try again.")
+                await safe_send(ctx, session_sender, error_msg)
+                return
+            
+            if not isinstance(result, dict) or "type" not in result:
+                ctx.logger.error(f"dispatch_intent returned invalid result: {result}")
+                error_msg = create_text_chat("Sorry, I encountered an error processing your request. Please try again.")
+                await safe_send(ctx, session_sender, error_msg)
+                return
+            
+            # Update dispatch plan with JSON values (location, start_time, end_time)
+            if result.get("type") == "dispatch_plan":
+                dispatch_data = result.get("data", {})
+                constraints = dispatch_data.get("constraints", {})
+                
+                # Always use JSON location if available (prioritize over dispatch plan location)
+                if json_location:
+                    constraints["location"] = json_location
+                    ctx.logger.info(f'Using location from JSON input in dispatch plan: {json_location}')
+                
+                # Add times if available and not already in constraints
+                if start_time_to_use and not constraints.get("start_time"):
+                    constraints["start_time"] = start_time_to_use
+                    ctx.logger.info(f'Added start_time to dispatch plan: {start_time_to_use}')
+                
+                if end_time_to_use and not constraints.get("end_time"):
+                    constraints["end_time"] = end_time_to_use
+                    ctx.logger.info(f'Added end_time to dispatch plan: {end_time_to_use}')
+                
+                dispatch_data["constraints"] = constraints
+                result["data"] = dispatch_data
         
-        # Get conversation state
-        conversation_state_key = f"conversation_state_{session_sender}"
-        conversation_state = ctx.storage.get(conversation_state_key)
-        
-        # Process intent dispatch
-        result = dispatch_intent(user_request, session_sender, conversation_state)
-        
-        if result["type"] == "error":
+        if result.get("type") == "error":
             error_msg = json.dumps(result["data"], indent=2)
             await safe_send(ctx, session_sender, create_text_chat(error_msg))
         elif result["type"] == "clarification_needed":
@@ -217,7 +468,21 @@ async def handle_structured_output_response(
                 ctx.storage.set(conversation_state_key, None)
             
             dispatch_plan_json = json.dumps(result["data"], indent=2)
-            await safe_send(ctx, session_sender, create_text_chat(dispatch_plan_json, end_session=True))
+            ctx.logger.info(f'Sending dispatch plan to session_sender: {session_sender}')
+            ctx.logger.info(f'Dispatch plan length: {len(dispatch_plan_json)} chars')
+            ctx.logger.info(f'Intent dispatcher agent address: {ctx.agent.address}')
+            
+            # Try sending directly first, then fall back to safe_send
+            response_message = create_text_chat(dispatch_plan_json, end_session=True)
+            try:
+                ctx.logger.info(f'Attempting direct send to {session_sender}...')
+                await ctx.send(session_sender, response_message)
+                ctx.logger.info(f'Direct send successful to {session_sender}')
+            except Exception as direct_error:
+                ctx.logger.warning(f'Direct send failed: {direct_error}, trying safe_send...')
+                send_result = await safe_send(ctx, session_sender, response_message)
+                if not send_result:
+                    ctx.logger.error(f'Both direct send and safe_send failed for {session_sender}')
             
     except Exception as err:
         ctx.logger.error(f"Error processing structured output: {err}")

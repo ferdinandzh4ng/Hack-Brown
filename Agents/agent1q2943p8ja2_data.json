@@ -1,0 +1,20 @@
+{
+    "b7c91791-f192-4315-adad-ab85bcf57197": "agent1qfsuxw6yaz223jppu974lf2kyuznqeruvy3rnu0pw3m6acmtmxmq7c5yz7k",
+    "last_sender_b7c91791-f192-4315-adad-ab85bcf57197": "agent1qfsuxw6yaz223jppu974lf2kyuznqeruvy3rnu0pw3m6acmtmxmq7c5yz7k",
+    "original_message_b7c91791-f192-4315-adad-ab85bcf57197": "Plan me a night out in toronto where i can eat and sightsee and spend around 500$",
+    "c63e2154-4efd-48f5-ae69-d3407e2ddf68": "agent1qg2akmff6ke58spye465yje4e5fvdk6faku59h2akjjtu5hmkf8rqy346qj",
+    "last_sender_c63e2154-4efd-48f5-ae69-d3407e2ddf68": "agent1qg2akmff6ke58spye465yje4e5fvdk6faku59h2akjjtu5hmkf8rqy346qj",
+    "original_message_c63e2154-4efd-48f5-ae69-d3407e2ddf68": "Plan me a day in Toronto from 10 am to 7pm where I can eat, sightsee and shop all day. I have a budget of 500$",
+    "extracted_start_time_c63e2154-4efd-48f5-ae69-d3407e2ddf68": "10am",
+    "extracted_end_time_c63e2154-4efd-48f5-ae69-d3407e2ddf68": "7pm",
+    "conversation_state_agent1qg2akmff6ke58spye465yje4e5fvdk6faku59h2akjjtu5hmkf8rqy346qj": null,
+    "a3a54cd7-2faf-470c-b822-cc7ad1b4457e": "agent1qg2akmff6ke58spye465yje4e5fvdk6faku59h2akjjtu5hmkf8rqy346qj",
+    "last_sender_a3a54cd7-2faf-470c-b822-cc7ad1b4457e": "agent1qg2akmff6ke58spye465yje4e5fvdk6faku59h2akjjtu5hmkf8rqy346qj",
+    "original_message_a3a54cd7-2faf-470c-b822-cc7ad1b4457e": "@llgorchgoatfrfrfr { \"start_time\": \"2024-12-20T18:00:00Z\", \"end_time\": \"2024-12-20T23:00:00Z\", \"location\": \"Toronto\", \"user_request\": \"Plan me a night out where I can eat and sightsee and spend around 500$\" }",
+    "0f3355ed-632b-4c28-a3b9-23e70e653835": "agent1qg2akmff6ke58spye465yje4e5fvdk6faku59h2akjjtu5hmkf8rqy346qj",
+    "last_sender_0f3355ed-632b-4c28-a3b9-23e70e653835": "agent1qg2akmff6ke58spye465yje4e5fvdk6faku59h2akjjtu5hmkf8rqy346qj",
+    "original_message_0f3355ed-632b-4c28-a3b9-23e70e653835": "Plan me a night out where I can eat and sightsee and spend around 500$",
+    "json_location_0f3355ed-632b-4c28-a3b9-23e70e653835": "Toronto",
+    "json_start_time_0f3355ed-632b-4c28-a3b9-23e70e653835": "2024-12-20T18:00:00Z",
+    "json_end_time_0f3355ed-632b-4c28-a3b9-23e70e653835": "2024-12-20T23:00:00Z"
+}

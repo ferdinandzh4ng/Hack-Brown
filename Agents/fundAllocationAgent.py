@@ -397,11 +397,8 @@ async def handle_allocation_request(ctx: Context, sender: str, msg: ChatMessage)
     """
     ctx.logger.info(f"Fund Allocation agent received message from {sender}")
     
-    # Send acknowledgement
-    await ctx.send(
-        sender,
-        ChatAcknowledgement(timestamp=datetime.utcnow(), acknowledged_msg_id=msg.msg_id),
-    )
+    # NOTE: Not sending ChatAcknowledgement to avoid interfering with ctx.send_and_receive
+    # The orchestrator uses send_and_receive which can match acknowledgements instead of actual responses
     
     try:
         for item in msg.content:

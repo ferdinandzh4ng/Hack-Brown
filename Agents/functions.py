@@ -98,16 +98,20 @@ Analyze the following user request and determine if it's too vague to create a s
 
 A request is considered vague if:
 - It only mentions a location without specific activities (e.g., "Plan me a day in New York", "I want to visit Paris")
-- It lacks clear preferences or interests
+- It lacks clear preferences or interests AND doesn't specify activity types
 - It's too general and doesn't specify what types of activities the user wants
 - It asks for a "day plan" or "itinerary" without specifying activities
 
 A request is NOT vague if:
 - It mentions specific activities (e.g., "I want to visit the Eiffel Tower and eat at a French restaurant")
 - It includes clear preferences (e.g., "I like museums and art galleries")
-- It specifies activity types (e.g., "I want to go shopping and sightseeing")
+- It specifies activity types (e.g., "I want to go shopping and sightseeing", "eat and sightsee", "dining and sightseeing")
+- It mentions activity categories like "eat", "dining", "sightsee", "sightseeing", "shop", "shopping", etc. along with a budget
 
-IMPORTANT: If the request only mentions a location and asks for a plan/itinerary without specific activities, it IS vague.
+IMPORTANT: 
+- If the request specifies activity types (like "eat", "sightsee", "shop", "dining", "sightseeing") AND mentions a budget, it is NOT vague, even if location is not explicitly mentioned in the text.
+- If the request only mentions a location and asks for a plan/itinerary without specific activities, it IS vague.
+- Location is helpful but NOT required if activities and budget are specified.
 
 Return ONLY valid JSON:
 {
@@ -527,6 +531,9 @@ def check_vagueness(user_text: str) -> dict:
         # Default to vague if we can't check, so we prompt the user
         # Try to extract location from text as fallback
         import re
+        # Ensure user_text is a string before using regex
+        if not isinstance(user_text, str):
+            user_text = str(user_text)
         location_match = re.search(r'\b(?:in|at|to|visit|visit|going to|trip to)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)', user_text, re.IGNORECASE)
         location = location_match.group(1) if location_match else None
         return {"is_vague": True, "location": location, "reason": "Error checking - defaulting to vague"}
@@ -839,15 +846,34 @@ def dispatch_intent(user_request: str, sender: str, conversation_state: Optional
         is_vague = vagueness_result.get("is_vague", False)
         location = vagueness_result.get("location")
         
+        # Ensure user_request is a string before string operations
+        if not isinstance(user_request, str):
+            user_request = str(user_request)
+        
+        # Check if request mentions specific activity types (not vague if activities are specified)
+        activity_keywords = ["eat", "dining", "sightsee", "sightseeing", "shop", "shopping", "entertainment", 
+                            "museum", "gallery", "park", "adventure", "outdoor", "cultural", "relax", "spa"]
+        has_activities = any(keyword in user_request.lower() for keyword in activity_keywords)
+        
+        # If activities are specified, override the vagueness check - request is NOT vague
+        if has_activities:
+            is_vague = False
+            print(f"Request has activities specified, overriding vagueness check - not vague")
+        
         # Also check if this looks like a general planning request (contains words like "plan", "itinerary", "day in")
         is_planning_request = any(word in user_request.lower() for word in ["plan", "itinerary", "day in", "visit", "trip to"])
         
-        # Treat as vague if: explicitly marked vague OR (has location AND looks like general planning request)
-        if is_vague or (location and is_planning_request):
+        # Treat as vague if: explicitly marked vague OR (has location AND looks like general planning request AND no activities)
+        if is_vague or (location and is_planning_request and not has_activities):
             # REQUEST IS VAGUE - Need to gather more information
             # If location wasn't extracted, try to extract it from text
             if not location:
                 import re
+                # Ensure user_request is a string before using regex
+                if isinstance(user_request, dict):
+                    user_request = str(user_request)
+                elif not isinstance(user_request, str):
+                    user_request = str(user_request)
                 # Try to find location patterns like "in New York", "visit Paris", "trip to Tokyo"
                 location_match = re.search(r'\b(?:in|at|to|visit|trip to|going to)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)', user_request, re.IGNORECASE)
                 if location_match:
