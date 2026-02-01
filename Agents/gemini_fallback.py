@@ -291,6 +291,8 @@ def generate_schedule_with_gemini(
         
         prompt = f"""You are a travel planning assistant. Create a detailed schedule for a trip to {location} with a budget of ${budget:.2f}.
 
+RULE: When the user's prompt says a location (e.g. Providence, Providence RI, Rhode Island, Toronto), all results MUST be based on that location only. Use ONLY "{location}" here. All venues and addresses MUST be in this location. Never substitute a different city.
+
 User interests: {activities_str}
 Duration: approximately {duration_hours:.1f} hours{time_info}{preferences_context}
 
@@ -544,6 +546,8 @@ def get_timezone_for_location(location: str):
         "chicago": "America/Chicago",
         "san francisco": "America/Los_Angeles",
         "boston": "America/New_York",
+        "providence": "America/New_York",
+        "rhode island": "America/New_York",
         "miami": "America/New_York",
         "seattle": "America/Los_Angeles",
         "denver": "America/Denver",

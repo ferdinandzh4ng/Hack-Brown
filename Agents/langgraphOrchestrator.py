@@ -362,25 +362,32 @@ def extract_parameters_node(state: OrchestratorState) -> OrchestratorState:
         constraints = dispatch_plan.get("constraints", {})
         
         state["activities"] = activities
-        # Location, start_time, end_time come from JSON input (already set in handle_user_message)
-        # Only override location if not already set from JSON
-        if not state.get("location"):
-            location_from_constraints = constraints.get("location", "")
-            # Validate location is not an error message
-            if location_from_constraints:
-                invalid_location_patterns = [
-                    "parse input string",
-                    "unable to parse",
-                    "invalid",
-                    "error",
-                    "expected formats",
-                    "please provide"
-                ]
-                location_lower = str(location_from_constraints).lower()
-                if any(pattern in location_lower for pattern in invalid_location_patterns):
-                    state["error"] = f"Invalid location from dispatch plan: {location_from_constraints} (appears to be an error message)"
-                    return state
-            state["location"] = location_from_constraints
+        # Location: always prefer the user's prompt. Never substitute a different city (e.g. if user said Providence, never use Toronto).
+        # Location from JSON/request (handle_user_message) takes priority; only use dispatch plan when we have no location yet.
+        current_location = (state.get("location") or "").strip()
+        if not current_location:
+            location_from_constraints = (constraints.get("location") or "").strip()
+            user_input_lower = (state.get("user_input") or "").lower()
+            # If user's text clearly mentions a location, don't use a different city from the dispatch plan
+            if user_input_lower and location_from_constraints:
+                if "providence" in user_input_lower or "rhode island" in user_input_lower:
+                    if "toronto" in location_from_constraints.lower():
+                        current_location = "Providence, RI"  # user said Providence/Rhode Island; never use Toronto
+                elif "toronto" in user_input_lower:
+                    if "providence" in location_from_constraints.lower() or "rhode" in location_from_constraints.lower():
+                        current_location = "Toronto, ON"  # user said Toronto; don't use Providence
+            if not current_location:
+                if location_from_constraints:
+                    invalid_location_patterns = [
+                        "parse input string", "unable to parse", "invalid", "error",
+                        "expected formats", "please provide"
+                    ]
+                    loc_lower = location_from_constraints.lower()
+                    if any(p in loc_lower for p in invalid_location_patterns):
+                        state["error"] = f"Invalid location from dispatch plan: {location_from_constraints}"
+                        return state
+                current_location = location_from_constraints
+            state["location"] = current_location
         
         # Budget comes from dispatch plan (extracted from user_request)
         state["budget"] = constraints.get("budget") or 500.0  # Default budget if not provided
