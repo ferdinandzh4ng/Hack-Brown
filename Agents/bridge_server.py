@@ -242,6 +242,7 @@ class ScheduleRequest(BaseModel):
     location: str
     start_time: str  # ISO 8601 format
     end_time: str    # ISO 8601 format
+    budget: Optional[float] = None  # Optional budget in dollars
     user_id: Optional[str] = None  # Optional user ID for preference-based planning
 
 class ScheduleResponse(BaseModel):
@@ -292,7 +293,8 @@ async def call_gemini_fallback(
     location: str,
     start_time: str,
     end_time: str,
-    user_id: Optional[str] = None
+    user_id: Optional[str] = None,
+    budget: Optional[float] = None
 ) -> dict:
     """Call Gemini fallback with extracted activities and budget"""
     if not GEMINI_FALLBACK_AVAILABLE:
@@ -302,12 +304,14 @@ async def call_gemini_fallback(
         }
     
     try:
-        activities, budget = extract_activities_and_budget(user_request)
+        activities, extracted_budget = extract_activities_and_budget(user_request)
+        # Use provided budget if available, otherwise use extracted budget
+        final_budget = budget if budget is not None else extracted_budget
         
-        print(f"Calling Gemini fallback with: location={location}, budget={budget}, activities={activities}, user_id={user_id}")
+        print(f"Calling Gemini fallback with: location={location}, budget={final_budget}, activities={activities}, user_id={user_id}")
         gemini_result = generate_schedule_with_gemini(
             location=location,
-            budget=budget,
+            budget=final_budget,
             interest_activities=activities,
             start_time=start_time,
             end_time=end_time,
@@ -455,7 +459,7 @@ def generate_simple_fallback_schedule(
         "fallback_reason": "Gemini API quota exceeded"
     }
 
-async def send_to_orchestrator(user_request: str, location: str, start_time: str, end_time: str) -> dict:
+async def send_to_orchestrator(user_request: str, location: str, start_time: str, end_time: str, budget: Optional[float] = None) -> dict:
     """Send request to orchestrator and wait for response"""
     # Clear any stale messages from previous requests
     bridge_state.reset()
@@ -497,6 +501,8 @@ async def send_to_orchestrator(user_request: str, location: str, start_time: str
         "start_time": start_time,
         "end_time": end_time
     }
+    if budget is not None:
+        request_data["budget"] = budget
     
     # Create ChatMessage
     message = ChatMessage(
@@ -604,7 +610,8 @@ async def send_to_orchestrator(user_request: str, location: str, start_time: str
                 location=location,
                 start_time=start_time,
                 end_time=end_time,
-                user_id=None  # user_id not available in this context
+                user_id=None,  # user_id not available in this context
+                budget=None  # budget not available in this context
             )
             if gemini_result and not gemini_result.get("error"):
                 return gemini_result
@@ -640,7 +647,8 @@ async def create_schedule(request: ScheduleRequest):
             request.user_request,
             request.location,
             request.start_time,
-            request.end_time
+            request.end_time,
+            request.budget
         )
         
         # If orchestrator fails and we have user_id, try gemini fallback with preferences
@@ -651,7 +659,8 @@ async def create_schedule(request: ScheduleRequest):
                 location=request.location,
                 start_time=request.start_time,
                 end_time=request.end_time,
-                user_id=request.user_id
+                user_id=request.user_id,
+                budget=request.budget
             )
             if gemini_result and not gemini_result.get("error"):
                 return ScheduleResponse(success=True, data=gemini_result)

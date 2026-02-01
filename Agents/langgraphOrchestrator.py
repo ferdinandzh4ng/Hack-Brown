@@ -188,7 +188,7 @@ async def call_intent_dispatcher_agent(
 ) -> Dict:
     """Call intent dispatcher agent via Fetch.ai using send_and_receive"""
     try:
-        # If we have location, start_time, or end_time, send them as JSON to agents.py
+        # If we have location, start_time, end_time, or budget, send them as JSON to agents.py
         if location or start_time or end_time:
             message_data = {
                 "user_request": user_input
@@ -772,8 +772,16 @@ async def call_budget_filter_node(state: OrchestratorState, ctx: Context) -> Orc
                 except Exception as gemini_err:
                     ctx.logger.error(f"[Budget Filter] Exception in Gemini fallback: {gemini_err}")
             
-            # If fallback failed or not available, set error
-            state["budget_filter_response"] = {"error": "Cannot filter due to agent errors and Gemini fallback unavailable/failed"}
+            # If fallback failed or not available, set error with actual agent details
+            fund_err = fund_allocation.get("error", "Unknown")
+            events_err = events_scraper.get("error", "Unknown")
+            state["budget_filter_response"] = {
+                "error": (
+                    f"Fund allocation and events scraper both failed. "
+                    f"Fund allocation: {fund_err}. Events scraper: {events_err}. "
+                    "Gemini fallback unavailable or also failed."
+                )
+            }
             return state
         elif fund_allocation.get("error") or events_scraper.get("error"):
             ctx.logger.warning("One agent returned error, attempting budget filter with available data")
@@ -1207,12 +1215,13 @@ async def handle_user_message(ctx: Context, sender: str, msg: ChatMessage):
                 await ctx.send(sender, error_msg)
                 return
             
-            # Check if it's the new JSON format with start_time, end_time, location, user_request
+            # Check if it's the new JSON format with start_time, end_time, location, user_request, budget
             if "user_request" in parsed_json and "location" in parsed_json:
                 user_request_text = parsed_json.get("user_request", "")
                 location_from_json = parsed_json.get("location", "")
                 start_time_from_json = parsed_json.get("start_time")
                 end_time_from_json = parsed_json.get("end_time")
+                budget_from_json = parsed_json.get("budget")
                 
                 # Validate location is not an error message
                 invalid_location_patterns = [
@@ -1294,6 +1303,14 @@ async def handle_user_message(ctx: Context, sender: str, msg: ChatMessage):
             conversation_state = None
         
         # Initialize state with JSON values if provided (or from conversation_state if waiting for clarification)
+        # Extract budget from JSON or use default
+        budget_value = 0.0
+        if budget_from_json is not None:
+            try:
+                budget_value = float(budget_from_json)
+            except (ValueError, TypeError):
+                budget_value = 0.0
+        
         initial_state: OrchestratorState = {
             "user_input": user_request_text,  # Use user_request for intent dispatcher (or clarification response)
             "sender": sender,
@@ -1302,7 +1319,7 @@ async def handle_user_message(ctx: Context, sender: str, msg: ChatMessage):
             "dispatch_plan": None,
             "activities": [],
             "location": location_from_json or "",  # Use location from JSON or conversation_state
-            "budget": 0.0,
+            "budget": budget_value,  # Use budget from JSON or default to 0
             "timeframe": "",
             "start_time": start_time_from_json,  # Use start_time from JSON or conversation_state
             "end_time": end_time_from_json,  # Use end_time from JSON or conversation_state

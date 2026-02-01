@@ -283,8 +283,10 @@ async def handle_message(ctx: Context, sender: str, msg: ChatMessage):
                     end_time_from_json = parsed.get("end_time")
                     budget_from_json = parsed.get("budget")
                     
-                    # Store JSON values for later use
+                    # Store JSON values for later use; pending_location = current request (survives session change)
+                    ctx.storage.set("pending_location", location_from_json)
                     ctx.storage.set(f"json_location_{ctx.session}", location_from_json)
+                    ctx.storage.set(f"most_recent_location_{sender}", location_from_json)
                     ctx.storage.set(f"json_start_time_{ctx.session}", start_time_from_json)
                     ctx.storage.set(f"json_end_time_{ctx.session}", end_time_from_json)
                     if budget_from_json is not None:
@@ -454,8 +456,11 @@ async def handle_structured_output_response(
             if structured_budget is not None:
                 ctx.logger.info(f'Extracted budget from structured output: ${structured_budget}')
         
-        # Check for JSON values (from JSON input format)
-        json_location = ctx.storage.get(f"json_location_{ctx.session}")
+        # Use current request's location: pending_location (set when message received) beats stale session keys
+        pending_location = ctx.storage.get("pending_location")
+        json_location = pending_location or ctx.storage.get(f"json_location_{ctx.session}") or (ctx.storage.get(f"most_recent_location_{session_sender}") if session_sender else None)
+        if pending_location is not None:
+            ctx.storage.set("pending_location", None)  # clear so next request doesn't reuse it
         json_start_time = ctx.storage.get(f"json_start_time_{ctx.session}")
         json_end_time = ctx.storage.get(f"json_end_time_{ctx.session}")
         json_budget = ctx.storage.get(f"json_budget_{ctx.session}")

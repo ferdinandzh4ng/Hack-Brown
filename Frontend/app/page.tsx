@@ -8,7 +8,7 @@ import React, {
   useEffect,
 } from "react";
 import { useRouter } from "next/navigation";
-import { motion, AnimatePresence } from "framer-motion";
+import { motion, AnimatePresence, Reorder } from "framer-motion";
 import MapGL from "react-map-gl/mapbox";
 import { Marker, Source, Layer } from "react-map-gl/mapbox";
 import type { MapRef } from "react-map-gl/mapbox";
@@ -23,16 +23,17 @@ import {
   Check,
   ArrowRight,
   User,
+  Trash2,
   LogOut,
   Settings,
   ChevronDown,
+  Info,
 } from "lucide-react";
 import insightsData from "@/data/insights.json";
 import { City } from "country-state-city";
 import "mapbox-gl/dist/mapbox-gl.css";
 
 type ViewState = "IDLE" | "THINKING" | "RESULTS";
-type DisplayMode = "single" | "itinerary";
 
 interface Recommendation {
   id: string;
@@ -72,21 +73,6 @@ const RECOMMENDATION_COORDINATES: Record<string, [number, number]> = {
   "rec-1": [-71.396, 41.848],
   "rec-2": [-71.4002, 41.8275],
   "rec-3": [-71.403, 41.826],
-  "anchor-starbucks": [-71.4103, 41.8245],
-};
-
-/** Anchor location: always first result (Impromptu and Itinerary). */
-const ANCHOR_LOCATION: Recommendation = {
-  id: "anchor-starbucks",
-  title: "Starbucks",
-  cost: "$6.50",
-  address: "1 Financial Plaza, Providence, RI 02903",
-  coordinates: [-71.4103, 41.8245],
-  agent_reasoning:
-    "Strategically located at Financial Plaza, this Starbucks is a Visa Digital-First partner. Perfect for a secure, frictionless start to your Providence journey.",
-  score: "99",
-  startTime: "08:00",
-  endTime: "09:00",
 };
 
 function parseCost(costStr: string): number {
@@ -97,6 +83,13 @@ function parseCost(costStr: string): number {
 function parseTimeToMinutes(t: string): number {
   const [h, m] = t.split(":").map(Number);
   return (h ?? 0) * 60 + (m ?? 0);
+}
+
+/** Minutes since midnight -> "09:00" */
+function minutesToTimeStr(minutes: number): string {
+  const h = Math.floor(minutes / 60) % 24;
+  const m = Math.round(minutes % 60);
+  return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}`;
 }
 
 function formatTimeLabel(t: string): string {
@@ -118,7 +111,7 @@ function getCoords(rec: Recommendation): [number, number] | null {
 
 const itinerariesData = insightsData.itineraries as unknown as ItineraryGroup[];
 
-/** Flat list of all items (dedupe by id) for Impromptu mode */
+/** Flat list of all items (dedupe by id) for static fallback data */
 function flattenRecommendations(groups: ItineraryGroup[]): Recommendation[] {
   const seen = new Set<string>();
   const out: Recommendation[] = [];
@@ -135,115 +128,35 @@ function flattenRecommendations(groups: ItineraryGroup[]): Recommendation[] {
 
 const READ_MORE_THRESHOLD = 100;
 
-/** Memoized Impromptu card to avoid re-renders when dragging drawer */
-const ImpromptuCard = React.memo(function ImpromptuCard_({
-  rec,
-  isSelected,
-  isHighlighted,
-  cardBg,
-  drawerText,
-  drawerMuted,
-  isDarkMode,
-  onAuthorize,
-}: {
-  rec: Recommendation;
-  isSelected: boolean;
-  isHighlighted: boolean;
-  cardBg: string;
-  drawerText: string;
-  drawerMuted: string;
-  isDarkMode: boolean;
-  onAuthorize: (id: string) => void;
-}) {
-  const text = rec.agent_reasoning ?? "Part of your curated experience.";
-  const showReadMore = text.length > READ_MORE_THRESHOLD;
-  const [expanded, setExpanded] = React.useState(false);
-
-  return (
-    <article
-      id={`card-${rec.id}`}
-      className={`flex flex-col h-full min-h-0 border rounded-2xl p-4 md:p-5 shadow-sm scroll-mt-4 transition-shadow min-w-0 ${cardBg} ${
-        isHighlighted
-          ? "card-highlight-pulse ring-2 ring-visa-blue ring-offset-2"
-          : ""
-      }`}
-    >
-      <div className="flex flex-col flex-grow min-h-0 overflow-hidden">
-        <div className="flex justify-between items-start mb-2 md:mb-3">
-          <span
-            className={`trust-badge text-[10px] md:text-xs font-bold px-2 py-0.5 md:px-2.5 md:py-1 rounded border flex items-center gap-1 uppercase ${
-              isDarkMode
-                ? "bg-emerald-500/25 text-emerald-300 border-emerald-500/50"
-                : "bg-emerald-50 text-emerald-700 border-emerald-100"
-            }`}
-          >
-            <ShieldCheck className="w-3 h-3 md:w-3.5 md:h-3.5 shrink-0" />{" "}
-            {(rec as Recommendation & { score?: string }).score ?? "85"}% TRUST
-          </span>
-          <span
-            className={`font-price font-bold text-sm md:text-base ${drawerText}`}
-          >
-            {rec.cost}
-          </span>
-        </div>
-        <h4
-          className={`font-heading font-bold text-sm md:text-lg ${drawerText} mb-1`}
-        >
-          {rec.title}
-        </h4>
-        <p
-          className={`font-sans text-[11px] md:text-sm mb-1 ${drawerMuted} flex-grow min-h-0 ${expanded ? "" : "line-clamp-2"} ${!showReadMore ? "mb-3 md:mb-4" : ""}`}
-        >
-          {text}
-        </p>
-        {showReadMore && (
-          <button
-            type="button"
-            onClick={() => setExpanded((e) => !e)}
-            className={`font-sans font-medium text-[11px] md:text-xs mt-0.5 text-left mb-3 md:mb-4 ${drawerMuted} hover:underline focus:outline-none`}
-          >
-            {expanded ? "Show less" : "…read more"}
-          </button>
-        )}
-      </div>
-      <button
-        type="button"
-        onClick={() => onAuthorize(rec.id)}
-        className={`font-heading w-full py-3 md:py-4 rounded-xl font-bold text-xs md:text-sm tracking-tight transition-all shrink-0 mt-auto ${
-          isSelected
-            ? "bg-visa-gold text-slate-900 hover:bg-visa-gold/90"
-            : "bg-visa-blue text-white hover:bg-visa-blue-dark"
-        }`}
-      >
-        {isSelected ? "✓ In plan — tap to remove" : "Authorize — add to plan"}
-      </button>
-    </article>
-  );
-});
-
-/** Memoized Itinerary card */
+/** Memoized Itinerary card — builder mode: remove button, no authorize button; all items active */
 const ItineraryCard = React.memo(function ItineraryCard_({
   rec,
-  isSelected,
   isHighlighted,
   cardBg,
   drawerText,
   drawerMuted,
   isDarkMode,
-  onAuthorize,
+  builderMode,
+  onRemove,
+  displayStartTime,
+  displayEndTime,
 }: {
   rec: Recommendation;
-  isSelected: boolean;
   isHighlighted: boolean;
   cardBg: string;
   drawerText: string;
   drawerMuted: string;
   isDarkMode: boolean;
-  onAuthorize: (id: string) => void;
+  builderMode: boolean;
+  onRemove?: (id: string) => void;
+  displayStartTime?: string;
+  displayEndTime?: string;
 }) {
   const text = rec.agent_reasoning ?? "Part of this itinerary.";
   const showReadMore = text.length > READ_MORE_THRESHOLD;
   const [expanded, setExpanded] = React.useState(false);
+  const startTime = displayStartTime ?? rec.startTime;
+  const endTime = displayEndTime ?? rec.endTime;
 
   return (
     <article
@@ -254,29 +167,36 @@ const ItineraryCard = React.memo(function ItineraryCard_({
           : ""
       }`}
     >
-      <div className="relative flex items-center gap-2 mb-3 shrink-0 pl-12">
-        <div
-          className={`absolute left-[10px] top-0.75 shrink-0 rounded-full flex items-center justify-center z-10 ${
-            isSelected
-              ? "w-6 h-6 bg-visa-gold text-slate-900 border-2 border-white shadow-sm"
-              : "w-3 h-3 bg-visa-blue"
-          }`}
-          aria-hidden
-        >
-          {isSelected && <Check className="w-3.5 h-3.5" strokeWidth={3} />}
-        </div>
+      <div className="flex items-center gap-2 mb-3 shrink-0">
         <div className="flex-1 min-w-0">
           <span className={`font-sans text-xs font-bold ${drawerText}`}>
-            {rec.startTime && formatTimeLabel(rec.startTime)} –{" "}
-            {rec.endTime ? formatTimeLabel(rec.endTime) : "—"}
+            {startTime && formatTimeLabel(startTime)} –{" "}
+            {endTime ? formatTimeLabel(endTime) : "—"}
           </span>
         </div>
         <span className={`font-price font-bold text-sm shrink-0 ${drawerText}`}>
           {rec.cost}
         </span>
+        {builderMode && onRemove && (
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              onRemove(rec.id);
+            }}
+            className={`p-1.5 rounded-lg shrink-0 ${
+              isDarkMode
+                ? "hover:bg-slate-700 text-slate-300"
+                : "hover:bg-slate-200 text-slate-500"
+            }`}
+            aria-label={`Remove ${rec.title}`}
+          >
+            <Trash2 className="w-4 h-4" />
+          </button>
+        )}
       </div>
       <div className="flex flex-col flex-grow min-h-0 overflow-hidden">
-        <div className="flex justify-between items-start mb-1">
+        <div className="flex flex-col gap-0.5 mb-1">
           <span
             className={`trust-badge text-[10px] md:text-xs font-bold px-2 py-0.5 rounded border flex items-center gap-1 w-fit uppercase ${
               isDarkMode
@@ -285,7 +205,14 @@ const ItineraryCard = React.memo(function ItineraryCard_({
             }`}
           >
             <ShieldCheck className="w-3 h-3 shrink-0" />{" "}
-            {(rec as Recommendation & { score?: string }).score ?? "85"}% TRUST
+            Verified Vendor
+          </span>
+          <span
+            className={`font-sans text-[10px] flex items-center gap-0.5 ${drawerMuted}`}
+            title="Verified via Google Maps (10+ reviews)"
+          >
+            <Info className="w-3 h-3 shrink-0" aria-hidden />
+            Verified via Google Maps (10+ reviews)
           </span>
         </div>
         <h4
@@ -308,20 +235,6 @@ const ItineraryCard = React.memo(function ItineraryCard_({
           </button>
         )}
       </div>
-      <div className="mt-auto min-h-6 shrink-0" aria-hidden />
-      <div className="shrink-0">
-        <button
-          type="button"
-          onClick={() => onAuthorize(rec.id)}
-          className={`font-heading w-full py-3 md:py-4 rounded-xl font-bold text-xs md:text-sm tracking-tight transition-all ${
-            isSelected
-              ? "bg-visa-gold text-slate-900 hover:bg-visa-gold/90"
-              : "bg-visa-blue text-white hover:bg-visa-blue-dark"
-          }`}
-        >
-          {isSelected ? "✓ In plan — tap to remove" : "Authorize — add to plan"}
-        </button>
-      </div>
     </article>
   );
 });
@@ -333,7 +246,6 @@ export default function HelpingHandApp() {
   const [chatInput, setChatInput] = useState("");
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [isDarkMode, setIsDarkMode] = useState(false);
-  const [displayMode, setDisplayMode] = useState<DisplayMode>("itinerary");
   const [activeItineraryIndex, setActiveItineraryIndex] = useState(0);
   const mapRef = useRef<MapRef | null>(null);
 
@@ -401,6 +313,7 @@ export default function HelpingHandApp() {
   const [location, setLocation] = useState("");
   const [startTime, setStartTime] = useState("");
   const [endTime, setEndTime] = useState("");
+  const [budget, setBudget] = useState<string>("200"); // Default budget
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [apiRecommendations, setApiRecommendations] = useState<
@@ -408,9 +321,14 @@ export default function HelpingHandApp() {
   >([]);
   const [transitInfo, setTransitInfo] = useState<Map<number, any>>(new Map());
   const [apiBudget, setApiBudget] = useState<number | null>(null);
+  const [itineraryOrder, setItineraryOrder] = useState<string[]>([]);
+  const [timeOverrides, setTimeOverrides] = useState<
+    Record<string, { startTime: string; endTime: string }>
+  >({});
   const [isBooking, setIsBooking] = useState(false);
   const [bookingResult, setBookingResult] = useState<any>(null);
   const [showSuccessModal, setShowSuccessModal] = useState(false);
+  const [bookingConfirmed, setBookingConfirmed] = useState(false);
   const [user, setUser] = useState<any>(null);
   const [showUserMenu, setShowUserMenu] = useState(false);
 
@@ -428,53 +346,60 @@ export default function HelpingHandApp() {
       .sort();
   }, []);
 
-  // Use API recommendations if available, otherwise fall back to static data. Anchor Starbucks is always first.
+  // Use API recommendations if available, otherwise fall back to static data.
   const recommendations = useMemo(() => {
-    const base =
-      apiRecommendations.length > 0
-        ? apiRecommendations.filter((r) => r.id !== ANCHOR_LOCATION.id)
-        : flattenRecommendations(itinerariesData).filter(
-            (r) => r.id !== ANCHOR_LOCATION.id,
-          );
-    return [ANCHOR_LOCATION, ...base];
+    return apiRecommendations.length > 0
+      ? apiRecommendations
+      : flattenRecommendations(itinerariesData);
   }, [apiRecommendations]);
 
-  // Create itinerary groups from API data or static data. Anchor Starbucks is always first in each group.
+  // Create itinerary groups from API data or static data.
   const itineraryGroups = useMemo(() => {
     if (apiRecommendations.length > 0) {
-      const rest = apiRecommendations.filter(
-        (r) => r.id !== ANCHOR_LOCATION.id,
-      );
       return [
         {
           group_name: `${location} Itinerary`,
-          items: [ANCHOR_LOCATION, ...rest],
+          items: [...apiRecommendations],
         },
       ];
     }
-    return itinerariesData.map((g) => ({
-      ...g,
-      items: [
-        ANCHOR_LOCATION,
-        ...g.items.filter((r) => r.id !== ANCHOR_LOCATION.id),
-      ],
-    }));
+    return itinerariesData;
   }, [apiRecommendations, location]);
 
-  const activeGroupItems = useMemo(() => {
-    if (displayMode !== "itinerary" || !itineraryGroups[activeItineraryIndex])
-      return [];
-    const items = itineraryGroups[activeItineraryIndex].items.slice();
+  // Sync itinerary order when API results change: time-sorted ids
+  useEffect(() => {
+    if (apiRecommendations.length === 0) {
+      setItineraryOrder([]);
+      setTimeOverrides({});
+      return;
+    }
+    const items = [...apiRecommendations];
     items.sort((a, b) => {
       const sa = a.startTime ? parseTimeToMinutes(a.startTime) : 0;
       const sb = b.startTime ? parseTimeToMinutes(b.startTime) : 0;
       return sa - sb;
     });
-    return items;
-  }, [displayMode, activeItineraryIndex, itineraryGroups]);
+    setItineraryOrder(items.map((r) => r.id));
+    setTimeOverrides({});
+  }, [apiRecommendations]);
 
-  const itemsForView =
-    displayMode === "single" ? recommendations : activeGroupItems;
+  const activeGroupItems = useMemo(() => {
+    if (!itineraryGroups[activeItineraryIndex]) return [];
+    const items = itineraryGroups[activeItineraryIndex].items.slice();
+    if (itineraryOrder.length > 0) {
+      const orderMap = new Map(itineraryOrder.map((id, i) => [id, i]));
+      items.sort((a, b) => (orderMap.get(a.id) ?? 999) - (orderMap.get(b.id) ?? 999));
+    } else {
+      items.sort((a, b) => {
+        const sa = a.startTime ? parseTimeToMinutes(a.startTime) : 0;
+        const sb = b.startTime ? parseTimeToMinutes(b.startTime) : 0;
+        return sa - sb;
+      });
+    }
+    return items;
+  }, [activeItineraryIndex, itineraryGroups, itineraryOrder]);
+
+  const itemsForView = activeGroupItems;
 
   const itineraryTotalCost = useMemo(
     () => activeGroupItems.reduce((sum, r) => sum + parseCost(r.cost), 0),
@@ -503,23 +428,13 @@ export default function HelpingHandApp() {
 
   useEffect(() => {
     setSelectedIds([]);
-  }, [displayMode, activeItineraryIndex]);
+  }, [activeItineraryIndex]);
 
-  // Coords used for fitBounds: when 2+ selected, fit to selection path; otherwise all visible pins
   const coordsForFitBounds = useMemo(() => {
-    const selected = itemsForView
-      .filter((r) => selectedIds.includes(r.id))
-      .slice()
-      .sort((a, b) => {
-        const sa = a.startTime ? parseTimeToMinutes(a.startTime) : 0;
-        const sb = b.startTime ? parseTimeToMinutes(b.startTime) : 0;
-        return sa - sb;
-      });
-    const source = selected.length >= 2 ? selected : itemsForView;
-    return source
+    return activeGroupItems
       .map((r) => getCoords(r))
       .filter((c): c is [number, number] => c !== null);
-  }, [itemsForView, selectedIds]);
+  }, [activeGroupItems]);
 
   // Global map auto-bounding: fit to selection path when 2+ selected, else all pins
   useEffect(() => {
@@ -546,15 +461,9 @@ export default function HelpingHandApp() {
         [minLng, minLat],
         [maxLng, maxLat],
       ],
-      { padding: { top: 50, bottom: 350, left: 50, right: 50 }, duration: 800 },
+      { padding: { top: 80, bottom: 80, left: 80, right: 80 }, duration: 800 },
     );
-  }, [
-    viewState,
-    displayMode,
-    activeItineraryIndex,
-    coordsForFitBounds,
-    hasMapboxToken,
-  ]);
+  }, [viewState, activeItineraryIndex, coordsForFitBounds, hasMapboxToken]);
 
   // Geocode address using Mapbox
   const geocodeAddress = useCallback(
@@ -585,11 +494,51 @@ export default function HelpingHandApp() {
     ): Promise<{
       recommendations: Recommendation[];
       transitInfo: Map<number, any>;
+      backendError?: string;
     }> => {
-      if (!backendData || !backendData.activities)
+      if (!backendData)
         return { recommendations: [], transitInfo: new Map() };
 
-      const activities = backendData.activities;
+      // Backend may return error payload (orchestrator / intent dispatcher / agents)
+      if (backendData.type === "error") {
+        const d = backendData.data;
+        let msg: string | null =
+          typeof backendData.message === "string" ? backendData.message : null;
+        if (!msg && typeof d === "object" && d !== null) {
+          const raw = d.error ?? d.message;
+          msg = typeof raw === "string" ? raw : null;
+        }
+        if (!msg) msg = typeof backendData.error === "string" ? backendData.error : null;
+        if (!msg && typeof d === "string") msg = d;
+        return {
+          recommendations: [],
+          transitInfo: new Map(),
+          backendError: msg || "Request failed",
+        };
+      }
+      // Top-level "error" (e.g. bridge/Gemini fallback)
+      if (backendData.error) {
+        return {
+          recommendations: [],
+          transitInfo: new Map(),
+          backendError: String(backendData.error),
+        };
+      }
+
+      // Activities can be at top level or under .data (nested response)
+      let activities =
+        backendData.activities ??
+        backendData.data?.activities ??
+        null;
+      if (!activities || (typeof activities === "object" && !Object.keys(activities).length))
+        return { recommendations: [], transitInfo: new Map() };
+
+      // Normalize: backend may return array (e.g. some fallbacks)
+      if (Array.isArray(activities)) {
+        activities = Object.fromEntries(
+          activities.map((a: any, i: number) => [`Activity ${i + 1}`, a])
+        );
+      }
       const recommendations: Recommendation[] = [];
       const transitInfo = new Map<number, any>();
 
@@ -716,6 +665,8 @@ export default function HelpingHandApp() {
           location,
           start_time: startTimeISO,
           end_time: endTimeISO,
+          budget: parseFloat(budget) || 200,
+          user_id: user?.user_id,
         }),
         signal: controller.signal,
       });
@@ -729,19 +680,19 @@ export default function HelpingHandApp() {
       if (!response.ok) throw new Error(`API error: ${response.statusText}`);
       const result = await response.json();
       if (!result.success) throw new Error(result.error || "Unknown error");
-      const { recommendations, transitInfo } = await transformBackendResponse(
-        result.data,
-      );
-      const rest = recommendations.filter((r) => r.id !== ANCHOR_LOCATION.id);
-      const recs = [ANCHOR_LOCATION, ...rest];
-      setApiRecommendations(recs);
+      const { recommendations, transitInfo, backendError } =
+        await transformBackendResponse(result.data);
+      setApiRecommendations(recommendations);
       setTransitInfo(transitInfo);
       setApiBudget(result.data?.budget ?? null);
       setError(null);
-      if (recs.length > 0) {
+      if (backendError) {
+        setError(backendError);
+        setViewState("IDLE");
+      } else if (recommendations.length > 0) {
         setViewState("RESULTS");
       } else {
-        setError("No activities found");
+        setError("No activities found. Try a different location or request.");
         setViewState("IDLE");
       }
     } catch (err) {
@@ -772,33 +723,52 @@ export default function HelpingHandApp() {
       }
       setIsLoading(false);
     }
-  }, [chatInput, location, startTime, endTime, transformBackendResponse]);
+  }, [chatInput, location, startTime, endTime, budget, user, transformBackendResponse]);
 
   const handleAuthorize = useCallback((id: string) => {
-    setSelectedIds((prev) => {
-      // Impromptu: single selection only — new selection replaces previous
-      if (displayMode === "single") {
-        return prev.includes(id) ? [] : [id];
-      }
-      // Itinerary: toggle multi-select
-      return prev.includes(id)
-        ? prev.filter((x) => x !== id)
-        : [...prev, id];
-    });
-  }, [displayMode]);
+    setSelectedIds((prev) =>
+      prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]
+    );
+  }, []);
 
-  const handleAuthorizeFullItinerary = useCallback(() => {
-    const ids = activeGroupItems.map((r) => r.id);
-    setSelectedIds((prev) => {
-      const allSelected = ids.every((id) => prev.includes(id));
-      if (allSelected) return prev.filter((id) => !ids.includes(id));
-      const combined = prev.slice();
-      ids.forEach((id) => {
-        if (!combined.includes(id)) combined.push(id);
-      });
-      return combined;
+  const handleRemoveItineraryItem = useCallback((id: string) => {
+    setApiRecommendations((prev) => prev.filter((r) => r.id !== id));
+    setItineraryOrder((prev) => prev.filter((x) => x !== id));
+    setSelectedIds((prev) => prev.filter((x) => x !== id));
+    setTimeOverrides((prev) => {
+      const next = { ...prev };
+      delete next[id];
+      return next;
     });
-  }, [activeGroupItems]);
+  }, []);
+
+  const handleReorder = useCallback((newOrder: Recommendation[]) => {
+    setItineraryOrder(newOrder.map((r) => r.id));
+    const overrides: Record<string, { startTime: string; endTime: string }> = {};
+    let runningMinutes =
+      newOrder.length > 0
+        ? (() => {
+            const first = newOrder[0];
+            const start = timeOverrides[first.id]?.startTime ?? first.startTime;
+            return start ? parseTimeToMinutes(start) : 9 * 60;
+          })()
+        : 9 * 60;
+    for (const rec of newOrder) {
+      const override = timeOverrides[rec.id];
+      const start = override?.startTime ?? rec.startTime;
+      const end = override?.endTime ?? rec.endTime;
+      const durationMinutes =
+        start && end
+          ? Math.max(1, parseTimeToMinutes(end) - parseTimeToMinutes(start))
+          : 60;
+      overrides[rec.id] = {
+        startTime: minutesToTimeStr(runningMinutes),
+        endTime: minutesToTimeStr(runningMinutes + durationMinutes),
+      };
+      runningMinutes += durationMinutes;
+    }
+    setTimeOverrides(overrides);
+  }, [timeOverrides]);
 
   const [showPaymentModal, setShowPaymentModal] = useState(false);
 
@@ -831,12 +801,12 @@ export default function HelpingHandApp() {
   }, []);
 
   const handleConfirmAndBook = useCallback(async () => {
-    if (selectedIds.length === 0) {
+    const itemsToBook = activeGroupItems;
+    if (itemsToBook.length === 0) {
       setError("Please select at least one activity to book");
       return;
     }
 
-    // Check for payment method
     const hasPaymentMethod = await checkPaymentMethod();
     if (!hasPaymentMethod) {
       setShowPaymentModal(true);
@@ -848,15 +818,12 @@ export default function HelpingHandApp() {
     setBookingResult(null);
 
     try {
-      // Get selected items
-      const selectedItems = itemsForView
-        .filter((r) => selectedIds.includes(r.id))
-        .map((r) => ({
+      const selectedItems = itemsToBook.map((r) => ({
           id: r.id,
           title: r.title,
           cost: r.cost,
-          startTime: r.startTime,
-          endTime: r.endTime,
+          startTime: timeOverrides[r.id]?.startTime ?? r.startTime,
+          endTime: timeOverrides[r.id]?.endTime ?? r.endTime,
           address: r.address,
           coordinates: r.coordinates,
           agent_reasoning: r.agent_reasoning,
@@ -904,11 +871,8 @@ export default function HelpingHandApp() {
       setBookingResult(result.data);
       setError(null);
       
-      // Check if there are successful bookings/payments
-      const hasSuccess = result.data?.bookings?.some((b: any) => 
-        b.booking_status === "success" || b.payment_status === "paid"
-      );
-      if (hasSuccess) {
+      // Show success modal for all booking results (all are marked as success)
+      if (result.data?.bookings && result.data.bookings.length > 0) {
         setShowSuccessModal(true);
       }
     } catch (err) {
@@ -920,20 +884,12 @@ export default function HelpingHandApp() {
     } finally {
       setIsBooking(false);
     }
-  }, [selectedIds, itemsForView, location, checkPaymentMethod, user]);
+  }, [activeGroupItems, location, checkPaymentMethod, timeOverrides, user]);
 
-  // Route line only when 2+ items selected: time-sorted path (e.g. 08:00 Starbucks → next selected)
+  // Dashed gold path: only when 2+ items, redraws on reorder/remove
   const selectionPathGeoJSON = useMemo(() => {
-    const selected = itemsForView
-      .filter((r) => selectedIds.includes(r.id))
-      .slice()
-      .sort((a, b) => {
-        const sa = a.startTime ? parseTimeToMinutes(a.startTime) : 0;
-        const sb = b.startTime ? parseTimeToMinutes(b.startTime) : 0;
-        return sa - sb;
-      });
-    if (selected.length < 2) return null;
-    const coords = selected
+    if (activeGroupItems.length < 2) return null;
+    const coords = activeGroupItems
       .map((r) => getCoords(r))
       .filter((c): c is [number, number] => c !== null);
     if (coords.length < 2) return null;
@@ -942,7 +898,7 @@ export default function HelpingHandApp() {
       properties: {},
       geometry: { type: "LineString" as const, coordinates: coords },
     };
-  }, [itemsForView, selectedIds]);
+  }, [activeGroupItems]);
 
   const [highlightedCardId, setHighlightedCardId] = useState<string | null>(
     null,
@@ -985,10 +941,8 @@ export default function HelpingHandApp() {
     );
   }
 
-  // Get successful bookings for modal
-  const successfulBookings = bookingResult?.bookings?.filter(
-    (b: any) => b.booking_status === "success" || b.payment_status === "paid"
-  ) || [];
+  // Get all bookings for modal (all are marked as success now)
+  const allBookings = bookingResult?.bookings || [];
 
   return (
     <div
@@ -1025,11 +979,10 @@ export default function HelpingHandApp() {
               </Source>
             )}
             {viewState === "RESULTS" &&
-              itemsForView.map((rec) => {
+              activeGroupItems.map((rec) => {
                 const coords = getCoords(rec);
                 if (!coords) return null;
                 const [longitude, latitude] = coords;
-                const isSelected = selectedIds.includes(rec.id);
                 return (
                   <Marker
                     key={rec.id}
@@ -1042,14 +995,10 @@ export default function HelpingHandApp() {
                       <button
                         type="button"
                         className="w-8 h-8 rounded-full border-2 border-white shadow-lg flex items-center justify-center hover:scale-110 active:scale-95 transition-transform focus:outline-none focus:ring-2 focus:ring-visa-gold focus:ring-offset-2"
-                        style={{
-                          backgroundColor: isSelected ? "#F7B600" : "#003399",
-                        }}
+                        style={{ backgroundColor: "#F7B600" }}
                         aria-label={`Go to ${rec.title}`}
                       >
-                        <MapPin
-                          className={`w-3.5 h-3.5 ${isSelected ? "text-slate-900" : "text-white"}`}
-                        />
+                        <MapPin className="w-3.5 h-3.5 text-slate-900" />
                       </button>
                       <span
                         className="font-sans text-[10px] font-medium whitespace-nowrap mt-0.5 text-white"
@@ -1242,6 +1191,31 @@ export default function HelpingHandApp() {
                 />
               </div>
 
+              {/* Budget */}
+              <div>
+                <label
+                  className={`block text-xs font-semibold mb-1.5 ${drawerText}`}
+                >
+                  Budget ($)
+                </label>
+                <select
+                  value={budget}
+                  onChange={(e) => setBudget(e.target.value)}
+                  className={`font-sans w-full ${inputBg} p-3 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-visa-blue/20 ${drawerText}`}
+                >
+                  <option value="50">$50</option>
+                  <option value="100">$100</option>
+                  <option value="150">$150</option>
+                  <option value="200">$200</option>
+                  <option value="300">$300</option>
+                  <option value="500">$500</option>
+                  <option value="750">$750</option>
+                  <option value="1000">$1,000</option>
+                  <option value="1500">$1,500</option>
+                  <option value="2000">$2,000</option>
+                </select>
+              </div>
+
               {/* User Request */}
               <div>
                 <label
@@ -1376,6 +1350,7 @@ export default function HelpingHandApp() {
                   setApiRecommendations([]);
                   setTransitInfo(new Map());
                   setApiBudget(null);
+                  setItineraryOrder([]);
                   setError(null);
                 }}
                 className={`p-1.5 rounded-full ${
@@ -1388,49 +1363,8 @@ export default function HelpingHandApp() {
               </button>
             </div>
 
-            {/* Mode Toggle */}
-            <div
-              className={`px-4 py-3 flex items-center justify-between gap-3 border-b ${drawerBorder} shrink-0`}
-            >
-              <span className="font-heading text-xs font-bold uppercase tracking-tight text-slate-500">
-                MODE
-              </span>
-              <div
-                className={`flex rounded-xl p-1 ${isDarkMode ? "bg-slate-800" : "bg-slate-100"}`}
-                role="group"
-                aria-label="Display mode"
-              >
-                <button
-                  type="button"
-                  onClick={() => setDisplayMode("single")}
-                  className={`font-heading px-3 py-1.5 rounded-lg text-xs font-bold tracking-tight transition-all ${
-                    displayMode === "single"
-                      ? "bg-white text-visa-blue shadow-sm"
-                      : isDarkMode
-                        ? "text-slate-400 hover:text-slate-200"
-                        : "text-slate-500 hover:text-slate-800"
-                  }`}
-                >
-                  Impromptu
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setDisplayMode("itinerary")}
-                  className={`font-heading px-3 py-1.5 rounded-lg text-xs font-bold tracking-tight transition-all ${
-                    displayMode === "itinerary"
-                      ? "bg-white text-visa-blue shadow-sm"
-                      : isDarkMode
-                        ? "text-slate-400 hover:text-slate-200"
-                        : "text-slate-500 hover:text-slate-800"
-                  }`}
-                >
-                  Itinerary
-                </button>
-              </div>
-            </div>
-
             {/* Itinerary Group Tabs */}
-            {displayMode === "itinerary" && itineraryGroups.length > 1 && (
+            {itineraryGroups.length > 1 && (
               <div className={`px-4 py-2 border-b ${drawerBorder} shrink-0`}>
                 <div
                   className={`flex gap-1 p-1 rounded-xl ${isDarkMode ? "bg-slate-800" : "bg-slate-100"}`}
@@ -1466,10 +1400,7 @@ export default function HelpingHandApp() {
               <h3
                 className={`font-heading font-bold text-xs uppercase tracking-widest ${drawerMuted}`}
               >
-                {displayMode === "itinerary"
-                  ? (itineraryGroups[activeItineraryIndex]?.group_name ??
-                    "Itinerary")
-                  : "Recommended for You"}
+                {itineraryGroups[activeItineraryIndex]?.group_name ?? "Itinerary"}
               </h3>
               <span
                 className={`font-price text-xs font-bold px-2 py-1.5 rounded-md tracking-tighter ${
@@ -1477,11 +1408,7 @@ export default function HelpingHandApp() {
                     ? "bg-visa-gold/25 text-visa-gold border border-visa-gold/50"
                     : "text-visa-blue bg-[#003399]/10"
                 }`}
-                title={
-                  displayMode === "itinerary"
-                    ? "Budget after full itinerary"
-                    : "Updates in real time as you add/remove items"
-                }
+                title="Budget after full itinerary"
               >
                 Budget: ${remainingBudget.toFixed(2)}
               </span>
@@ -1493,53 +1420,8 @@ export default function HelpingHandApp() {
                 isDarkMode ? "scrollbar-drawer-dark" : "scrollbar-drawer"
               }`}
             >
-              {displayMode === "single" ? (
-                <>
-                  <div className="space-y-4">
-                    {itemsForView.map((rec) => (
-                      <ImpromptuCard
-                        key={rec.id}
-                        rec={rec}
-                        isSelected={selectedIds.includes(rec.id)}
-                        isHighlighted={highlightedCardId === rec.id}
-                        cardBg={cardBg}
-                        drawerText={drawerText}
-                        drawerMuted={drawerMuted}
-                        isDarkMode={isDarkMode}
-                        onAuthorize={handleAuthorize}
-                      />
-                    ))}
-                  </div>
-                  {selectedIds.length > 0 && (
-                    <div className={`mt-6 pt-6 border-t ${drawerBorder}`}>
-                      <button
-                        type="button"
-                        onClick={handleConfirmAndBook}
-                        disabled={isBooking}
-                        className={`font-heading w-full py-4 rounded-xl font-bold text-sm tracking-tight transition-all ${
-                          isBooking
-                            ? "bg-slate-400 text-white cursor-not-allowed"
-                            : "bg-emerald-600 text-white hover:bg-emerald-700"
-                        }`}
-                      >
-                        {isBooking ? (
-                          <>
-                            <span className="inline-block animate-spin mr-2">⏳</span>
-                            Processing bookings...
-                          </>
-                        ) : (
-                          <>
-                            ✓ Confirm & Book ({selectedIds.length} item
-                            {selectedIds.length !== 1 ? "s" : ""})
-                          </>
-                        )}
-                      </button>
-                    </div>
-                  )}
-                </>
-              ) : (
-                <div className="w-full pl-2">
-                  {activeGroupItems.length === 0 ? (
+              <div className="w-full pl-2">
+                {activeGroupItems.length === 0 ? (
                     <p
                       className={`font-sans py-8 text-center text-sm ${drawerMuted}`}
                     >
@@ -1547,169 +1429,65 @@ export default function HelpingHandApp() {
                     </p>
                   ) : (
                     <>
-                      <div className="space-y-6">
-                        {activeGroupItems.map((rec, index) => {
-                          const transit = transitInfo.get(index);
-                          const showTransit = transit && index > 0;
-
-                          return (
-                            <React.Fragment key={rec.id}>
-                              {showTransit && (
-                                <div className="flex items-center justify-center py-2">
-                                  <div
-                                    className={`flex items-center gap-2 px-4 py-2 rounded-lg ${isDarkMode ? "bg-slate-800" : "bg-slate-100"}`}
-                                  >
-                                    <ArrowRight
-                                      className={`w-4 h-4 ${drawerMuted}`}
-                                    />
-                                    <span
-                                      className={`text-xs font-medium ${drawerMuted}`}
-                                    >
-                                      {transit.method} • {transit.duration} min
-                                      {transit.cost > 0 &&
-                                        ` • $${transit.cost.toFixed(2)}`}
-                                    </span>
-                                  </div>
-                                </div>
-                              )}
-                              <ItineraryCard
-                                rec={rec}
-                                isSelected={selectedIds.includes(rec.id)}
-                                isHighlighted={highlightedCardId === rec.id}
-                                cardBg={cardBg}
-                                drawerText={drawerText}
-                                drawerMuted={drawerMuted}
-                                isDarkMode={isDarkMode}
-                                onAuthorize={handleAuthorize}
-                              />
-                            </React.Fragment>
-                          );
-                        })}
-                      </div>
-                      <div className={`mt-6 pt-6 border-t ${drawerBorder} space-y-3`}>
+                      <Reorder.Group
+                        as="div"
+                        axis="y"
+                        values={activeGroupItems}
+                        onReorder={handleReorder}
+                        className="flex flex-col gap-6 list-none p-0 m-0"
+                      >
+                        {activeGroupItems.map((rec) => (
+                          <Reorder.Item
+                            key={rec.id}
+                            value={rec}
+                            className="relative cursor-grab active:cursor-grabbing touch-none"
+                            style={{ listStyle: "none" }}
+                          >
+                            <ItineraryCard
+                              rec={rec}
+                              isHighlighted={highlightedCardId === rec.id}
+                              cardBg={cardBg}
+                              drawerText={drawerText}
+                              drawerMuted={drawerMuted}
+                              isDarkMode={isDarkMode}
+                              builderMode
+                              onRemove={handleRemoveItineraryItem}
+                              displayStartTime={timeOverrides[rec.id]?.startTime}
+                              displayEndTime={timeOverrides[rec.id]?.endTime}
+                            />
+                          </Reorder.Item>
+                        ))}
+                      </Reorder.Group>
+                      <div className={`mt-6 pt-6 border-t ${drawerBorder}`}>
                         <button
                           type="button"
-                          onClick={handleAuthorizeFullItinerary}
+                          onClick={handleConfirmAndBook}
+                          disabled={isBooking || activeGroupItems.length === 0}
                           className={`font-heading w-full py-4 rounded-xl font-bold text-sm tracking-tight transition-all ${
-                            activeGroupItems.every((r) =>
-                              selectedIds.includes(r.id),
-                            )
-                              ? "bg-visa-gold text-slate-900 hover:bg-visa-gold/90"
-                              : "bg-visa-blue text-white hover:bg-visa-blue-dark"
+                            isBooking || activeGroupItems.length === 0
+                              ? "bg-slate-400 text-white cursor-not-allowed"
+                              : "bg-visa-gold text-slate-900 hover:bg-visa-gold/90 shadow-lg"
                           }`}
                         >
-                          {activeGroupItems.every((r) =>
-                            selectedIds.includes(r.id),
-                          ) ? (
-                            "✓ Full itinerary in plan — tap to remove"
+                          {isBooking ? (
+                            <>
+                              <span className="inline-block animate-spin mr-2">⏳</span>
+                              Processing…
+                            </>
                           ) : (
                             <>
-                              Authorize Full Itinerary —{" "}
+                              Confirm and Pay —{" "}
                               <span className="font-price">
                                 ${itineraryTotalCost.toFixed(2)}
                               </span>
                             </>
                           )}
                         </button>
-                        {selectedIds.length > 0 && (
-                          <button
-                            type="button"
-                            onClick={handleConfirmAndBook}
-                            disabled={isBooking}
-                            className={`font-heading w-full py-4 rounded-xl font-bold text-sm tracking-tight transition-all ${
-                              isBooking
-                                ? "bg-slate-400 text-white cursor-not-allowed"
-                                : "bg-emerald-600 text-white hover:bg-emerald-700"
-                            }`}
-                          >
-                            {isBooking ? (
-                              <>
-                                <span className="inline-block animate-spin mr-2">⏳</span>
-                                Processing bookings...
-                              </>
-                            ) : (
-                              <>
-                                ✓ Confirm & Book ({selectedIds.length} item
-                                {selectedIds.length !== 1 ? "s" : ""})
-                              </>
-                            )}
-                          </button>
-                        )}
                       </div>
                     </>
                   )}
-                </div>
-              )}
-            </div>
-
-            {/* Booking Results */}
-            {bookingResult && (
-              <div
-                className={`p-4 border-t ${drawerBorder} ${drawerBg} shrink-0 max-h-64 overflow-y-auto ${
-                  isDarkMode ? "scrollbar-drawer-dark" : "scrollbar-drawer"
-                }`}
-              >
-                <h4 className={`font-heading font-bold text-sm mb-2 ${drawerText}`}>
-                  Booking Results
-                </h4>
-                <div className="space-y-2">
-                  {bookingResult.bookings?.map((booking: any, idx: number) => (
-                    <div
-                      key={idx}
-                      className={`p-2 rounded-lg text-xs ${
-                        booking.booking_status === "success"
-                          ? isDarkMode
-                            ? "bg-emerald-500/20 text-emerald-300"
-                            : "bg-emerald-50 text-emerald-700"
-                          : booking.booking_status === "payment_required"
-                            ? isDarkMode
-                              ? "bg-yellow-500/20 text-yellow-300"
-                              : "bg-yellow-50 text-yellow-700"
-                            : isDarkMode
-                              ? "bg-slate-700 text-slate-300"
-                              : "bg-slate-100 text-slate-600"
-                      }`}
-                    >
-                      <div className="font-semibold">{booking.item_title}</div>
-                      <div className="text-[10px] mt-0.5">
-                        {booking.booking_status === "success" && (
-                          <>
-                            ✓ Booked
-                            {booking.confirmation_code && (
-                              <> • Code: {booking.confirmation_code}</>
-                            )}
-                            {booking.payment_status === "paid" && (
-                              <> • Paid: ${booking.payment_amount?.toFixed(2)}</>
-                            )}
-                          </>
-                        )}
-                        {booking.booking_status === "payment_required" && (
-                          <>⚠ Payment required at venue</>
-                        )}
-                        {booking.booking_status === "not_required" && (
-                          <>ℹ No booking required</>
-                        )}
-                        {booking.error_message && (
-                          <div className="mt-1 text-red-400">
-                            {booking.error_message}
-                          </div>
-                        )}
-                      </div>
-                    </div>
-                  ))}
-                </div>
-                {bookingResult.summary && (
-                  <div className={`mt-3 pt-3 border-t ${drawerBorder} text-xs ${drawerMuted}`}>
-                    <div>
-                      Total Paid: ${bookingResult.total_paid?.toFixed(2) || "0.00"}
-                    </div>
-                    <div>
-                      Items Booked: {bookingResult.summary.items_booked_successfully || 0}
-                    </div>
-                  </div>
-                )}
               </div>
-            )}
+            </div>
 
             {/* Refine Search Input */}
             <div
@@ -1799,7 +1577,7 @@ export default function HelpingHandApp() {
 
       {/* Success Modal */}
       <AnimatePresence>
-        {showSuccessModal && successfulBookings.length > 0 && (
+        {showSuccessModal && allBookings.length > 0 && (
           <motion.div
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
@@ -1858,7 +1636,7 @@ export default function HelpingHandApp() {
 
               {/* Booking Details */}
               <div className="space-y-3 mb-6 max-h-64 overflow-y-auto">
-                {successfulBookings.map((booking: any, idx: number) => (
+                {allBookings.map((booking: any, idx: number) => (
                   <div
                     key={idx}
                     className={`p-4 rounded-xl ${
@@ -1899,14 +1677,33 @@ export default function HelpingHandApp() {
                           </span>
                         </div>
                       )}
-                      {booking.booking_status === "success" && (
+                      {booking.booking_status === "success" && booking.booking_required && (
                         <div
                           className={`flex items-center gap-2 ${
                             isDarkMode ? "text-emerald-400" : "text-emerald-700"
                           }`}
                         >
                           <Check className="w-4 h-4" />
-                          <span>Booked</span>
+                          <span>Booked Online</span>
+                        </div>
+                      )}
+                      {booking.booking_status === "success" && !booking.booking_required && (
+                        <div
+                          className={`flex items-center gap-2 ${
+                            isDarkMode ? "text-blue-400" : "text-blue-700"
+                          }`}
+                        >
+                          <Check className="w-4 h-4" />
+                          <span>No Booking Required - Walk-in</span>
+                        </div>
+                      )}
+                      {booking.notes && (
+                        <div
+                          className={`text-xs mt-1 ${
+                            isDarkMode ? "text-slate-400" : "text-slate-600"
+                          }`}
+                        >
+                          {booking.notes}
                         </div>
                       )}
                     </div>
@@ -1944,13 +1741,25 @@ export default function HelpingHandApp() {
                 </div>
               )}
 
-              {/* Close Button */}
-              <button
-                onClick={() => setShowSuccessModal(false)}
-                className="w-full py-3 rounded-xl bg-visa-blue text-white font-semibold hover:bg-visa-blue/90 transition-colors"
-              >
-                Done
-              </button>
+              {/* Close Button / Confirmed State */}
+              {!bookingConfirmed ? (
+                <button
+                  onClick={() => {
+                    setBookingConfirmed(true);
+                    setTimeout(() => {
+                      setShowSuccessModal(false);
+                      setBookingConfirmed(false);
+                    }, 2000);
+                  }}
+                  className="w-full py-3 rounded-xl bg-visa-blue text-white font-semibold hover:bg-visa-blue/90 transition-colors"
+                >
+                  Confirm
+                </button>
+              ) : (
+                <div className="w-full py-3 rounded-xl bg-emerald-500 text-white font-semibold text-center">
+                  You're set to go!
+                </div>
+              )}
             </motion.div>
           </motion.div>
         )}
