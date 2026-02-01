@@ -21,7 +21,7 @@ Utilizing Fetchai, we were able to relegate tasks such as organizing a user's ho
 
 1. Our biggest challenge was that we had to pivot our idea since the API reflected the initial one that we'd fully built our plan around.
 2. Another major challenge was that we intended for purchasing to be fully functional, but with fetch.ai's instabilities, we could not get it functioning, so we cut the purchasing feature since it was always meant for Visa's API
-3. We tried using eventbrite, OpenRestaurant, and DoorDash to book restaurants, find tickets, and other activities but we needed to partner with them to get the API key so we had to look for other options.
+3. We tried using Eventbrite, OpenRestaurant, and DoorDash to book restaurants, find tickets, and other activities but we needed to partner with them to get the API key so we had to look for other options.
 4. Because we legally can’t make the bot automatically enter card details, so we use Stripe to manage payments instead. 
 
 
