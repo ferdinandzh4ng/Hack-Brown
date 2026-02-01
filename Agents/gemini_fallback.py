@@ -11,9 +11,19 @@ as the budget filter agent, ensuring compatibility.
 
 import json
 import os
+import sys
 from typing import Dict, List, Optional, Any
 from datetime import datetime, timedelta, timezone
 from dotenv import load_dotenv
+
+# Add Agents directory to path for imports
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+try:
+    from Login import LoginManager
+    LOGIN_MANAGER_AVAILABLE = True
+except ImportError:
+    LOGIN_MANAGER_AVAILABLE = False
+    print("Warning: LoginManager not available. User preferences will not be used.")
 
 try:
     import pytz
@@ -36,13 +46,67 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 if not GEMINI_API_KEY and GEMINI_AVAILABLE:
     print("Warning: GEMINI_API_KEY not found in environment variables")
 
+def is_vague_request(user_request: Optional[str]) -> bool:
+    """
+    Check if user request is vague (like "Plan me a day", "Plan a trip", etc.)
+    """
+    if not user_request:
+        return False
+    
+    vague_phrases = [
+        "plan me a day",
+        "plan a day",
+        "plan me a trip",
+        "plan a trip",
+        "plan something",
+        "plan activities",
+        "what should i do",
+        "what to do",
+        "suggest something",
+        "give me ideas",
+        "help me plan",
+        "create a plan",
+        "make a plan"
+    ]
+    
+    user_request_lower = user_request.lower().strip()
+    
+    # Check if request is very short (less than 20 chars) or matches vague phrases
+    if len(user_request_lower) < 20:
+        return True
+    
+    for phrase in vague_phrases:
+        if phrase in user_request_lower:
+            return True
+    
+    return False
+
+def get_user_preferences(user_id: Optional[str]) -> Optional[Dict]:
+    """
+    Get user preferences from database if user_id is provided
+    """
+    if not user_id or not LOGIN_MANAGER_AVAILABLE:
+        return None
+    
+    try:
+        login_manager = LoginManager()
+        user_profile = login_manager.get_user_profile(user_id)
+        
+        if user_profile and user_profile.get("preferences"):
+            return user_profile.get("preferences")
+    except Exception as e:
+        print(f"Error fetching user preferences: {e}")
+    
+    return None
+
 def generate_schedule_with_gemini(
     location: str,
     budget: float,
     interest_activities: List[str],
     start_time: Optional[str] = None,
     end_time: Optional[str] = None,
-    user_request: Optional[str] = None
+    user_request: Optional[str] = None,
+    user_id: Optional[str] = None
 ) -> Dict[str, Any]:
     """
     Generate a complete schedule using Gemini AI.
@@ -174,6 +238,31 @@ def generate_schedule_with_gemini(
             # Default to full day
             duration_hours = 12
         
+        # Check if request is vague and fetch user preferences if needed
+        preferences_context = ""
+        if is_vague_request(user_request) and user_id:
+            user_prefs = get_user_preferences(user_id)
+            if user_prefs:
+                # Extract activity categories and favorite stores
+                activity_categories = user_prefs.get("activity_categories", [])
+                favorite_stores = user_prefs.get("favorite_stores", [])
+                
+                if activity_categories or favorite_stores:
+                    prefs_list = []
+                    if activity_categories:
+                        prefs_list.append(f"Activity interests: {', '.join(activity_categories)}")
+                    if favorite_stores:
+                        prefs_list.append(f"Favorite stores/brands: {', '.join(favorite_stores)}")
+                    
+                    preferences_context = f"\n\nIMPORTANT - User Preferences (use these to create specific activities):\n" + "\n".join(prefs_list) + "\n\nWhen creating the schedule, be SPECIFIC and use these preferences to generate concrete activities. For example:\n"
+                    if activity_categories:
+                        preferences_context += "- If user likes 'dining', include specific restaurants in " + location + "\n"
+                        preferences_context += "- If user likes 'sightseeing', include specific landmarks, museums, or attractions in " + location + "\n"
+                        preferences_context += "- If user likes 'entertainment', include specific shows, events, or venues in " + location + "\n"
+                    if favorite_stores:
+                        preferences_context += "- Include visits to: " + ", ".join(favorite_stores) + " if available in " + location + "\n"
+                    preferences_context += "\nDo NOT use generic activity names. Use specific venue names, restaurant names, attraction names, etc. based on the user's preferences.\n"
+        
         # Build prompt for Gemini with timezone information
         activities_str = ", ".join(interest_activities)
         time_info = ""
@@ -203,7 +292,7 @@ def generate_schedule_with_gemini(
         prompt = f"""You are a travel planning assistant. Create a detailed schedule for a trip to {location} with a budget of ${budget:.2f}.
 
 User interests: {activities_str}
-Duration: approximately {duration_hours:.1f} hours{time_info}
+Duration: approximately {duration_hours:.1f} hours{time_info}{preferences_context}
 
 Generate a complete schedule with:
 1. Multiple activities/venues that match the user's interests
@@ -515,7 +604,9 @@ def generate_schedule_simple(
     budget: float,
     interest_activities: List[str],
     start_time: Optional[str] = None,
-    end_time: Optional[str] = None
+    end_time: Optional[str] = None,
+    user_request: Optional[str] = None,
+    user_id: Optional[str] = None
 ) -> Dict[str, Any]:
     """
     Simplified version that can be used as a direct replacement.
@@ -526,7 +617,9 @@ def generate_schedule_simple(
         budget=budget,
         interest_activities=interest_activities,
         start_time=start_time,
-        end_time=end_time
+        end_time=end_time,
+        user_request=user_request,
+        user_id=user_id
     )
 
 

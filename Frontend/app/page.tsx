@@ -410,6 +410,7 @@ export default function HelpingHandApp() {
   const [apiBudget, setApiBudget] = useState<number | null>(null);
   const [isBooking, setIsBooking] = useState(false);
   const [bookingResult, setBookingResult] = useState<any>(null);
+  const [showSuccessModal, setShowSuccessModal] = useState(false);
   const [user, setUser] = useState<any>(null);
   const [showUserMenu, setShowUserMenu] = useState(false);
 
@@ -861,12 +862,35 @@ export default function HelpingHandApp() {
           agent_reasoning: r.agent_reasoning,
         }));
 
+      // Get user_id from user object or session
+      let userId: string | undefined = undefined;
+      if (user?.user_id) {
+        userId = user.user_id;
+      } else {
+        // Try to get from session verification
+        const token = typeof localStorage !== "undefined"
+          ? localStorage.getItem("session_token")
+          : null;
+        if (token) {
+          try {
+            const { verifySession } = await import("@/lib/auth");
+            const result = await verifySession(token);
+            if (result.success && result.user?.user_id) {
+              userId = result.user.user_id;
+            }
+          } catch (err) {
+            console.error("Failed to get user_id:", err);
+          }
+        }
+      }
+
       const response = await fetch("http://localhost:8005/api/booking", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           items: selectedItems,
           location: location || "Unknown",
+          user_id: userId,
         }),
       });
 
@@ -879,6 +903,14 @@ export default function HelpingHandApp() {
 
       setBookingResult(result.data);
       setError(null);
+      
+      // Check if there are successful bookings/payments
+      const hasSuccess = result.data?.bookings?.some((b: any) => 
+        b.booking_status === "success" || b.payment_status === "paid"
+      );
+      if (hasSuccess) {
+        setShowSuccessModal(true);
+      }
     } catch (err) {
       console.error("Booking error:", err);
       setError(
@@ -888,7 +920,7 @@ export default function HelpingHandApp() {
     } finally {
       setIsBooking(false);
     }
-  }, [selectedIds, itemsForView, location, checkPaymentMethod]);
+  }, [selectedIds, itemsForView, location, checkPaymentMethod, user]);
 
   // Route line only when 2+ items selected: time-sorted path (e.g. 08:00 Starbucks → next selected)
   const selectionPathGeoJSON = useMemo(() => {
@@ -952,6 +984,11 @@ export default function HelpingHandApp() {
       </div>
     );
   }
+
+  // Get successful bookings for modal
+  const successfulBookings = bookingResult?.bookings?.filter(
+    (b: any) => b.booking_status === "success" || b.payment_status === "paid"
+  ) || [];
 
   return (
     <div
@@ -1755,6 +1792,165 @@ export default function HelpingHandApp() {
                   Go to Profile
                 </button>
               </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Success Modal */}
+      <AnimatePresence>
+        {showSuccessModal && successfulBookings.length > 0 && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm"
+            onClick={() => setShowSuccessModal(false)}
+          >
+            <motion.div
+              initial={{ scale: 0.9, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.9, opacity: 0 }}
+              onClick={(e) => e.stopPropagation()}
+              className={`relative w-full max-w-md rounded-3xl shadow-2xl ${
+                isDarkMode ? "bg-slate-800" : "bg-white"
+              } p-6 border ${
+                isDarkMode ? "border-slate-700" : "border-slate-200"
+              }`}
+            >
+              {/* Close button */}
+              <button
+                onClick={() => setShowSuccessModal(false)}
+                className={`absolute top-4 right-4 p-2 rounded-full ${
+                  isDarkMode
+                    ? "hover:bg-slate-700 text-slate-300"
+                    : "hover:bg-slate-100 text-slate-500"
+                } transition-colors`}
+              >
+                <X className="w-5 h-5" />
+              </button>
+
+              {/* Success Icon */}
+              <div className="flex flex-col items-center mb-6">
+                <motion.div
+                  initial={{ scale: 0 }}
+                  animate={{ scale: 1 }}
+                  transition={{ delay: 0.2, type: "spring", stiffness: 200 }}
+                  className="w-20 h-20 rounded-full bg-emerald-500 flex items-center justify-center mb-4"
+                >
+                  <Check className="w-10 h-10 text-white" />
+                </motion.div>
+                <h2
+                  className={`text-2xl font-bold mb-2 ${
+                    isDarkMode ? "text-white" : "text-slate-900"
+                  }`}
+                >
+                  Booking Successful!
+                </h2>
+                <p
+                  className={`text-sm ${
+                    isDarkMode ? "text-slate-400" : "text-slate-600"
+                  }`}
+                >
+                  Your bookings and payments have been confirmed
+                </p>
+              </div>
+
+              {/* Booking Details */}
+              <div className="space-y-3 mb-6 max-h-64 overflow-y-auto">
+                {successfulBookings.map((booking: any, idx: number) => (
+                  <div
+                    key={idx}
+                    className={`p-4 rounded-xl ${
+                      isDarkMode
+                        ? "bg-slate-700/50 border border-slate-600"
+                        : "bg-emerald-50 border border-emerald-200"
+                    }`}
+                  >
+                    <div
+                      className={`font-semibold mb-2 ${
+                        isDarkMode ? "text-white" : "text-slate-900"
+                      }`}
+                    >
+                      {booking.item_title}
+                    </div>
+                    <div className="space-y-1 text-sm">
+                      {booking.confirmation_code && (
+                        <div
+                          className={`flex items-center gap-2 ${
+                            isDarkMode ? "text-slate-300" : "text-slate-700"
+                          }`}
+                        >
+                          <span className="font-medium">Confirmation:</span>
+                          <span className="font-mono text-xs bg-slate-900/20 px-2 py-1 rounded">
+                            {booking.confirmation_code}
+                          </span>
+                        </div>
+                      )}
+                      {booking.payment_status === "paid" && (
+                        <div
+                          className={`flex items-center gap-2 ${
+                            isDarkMode ? "text-emerald-400" : "text-emerald-700"
+                          }`}
+                        >
+                          <Check className="w-4 h-4" />
+                          <span>
+                            Payment: ${booking.payment_amount?.toFixed(2)}
+                          </span>
+                        </div>
+                      )}
+                      {booking.booking_status === "success" && (
+                        <div
+                          className={`flex items-center gap-2 ${
+                            isDarkMode ? "text-emerald-400" : "text-emerald-700"
+                          }`}
+                        >
+                          <Check className="w-4 h-4" />
+                          <span>Booked</span>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+
+              {/* Summary */}
+              {bookingResult?.summary && (
+                <div
+                  className={`pt-4 border-t ${
+                    isDarkMode ? "border-slate-700" : "border-slate-200"
+                  } mb-4`}
+                >
+                  <div
+                    className={`flex justify-between text-sm ${
+                      isDarkMode ? "text-slate-300" : "text-slate-700"
+                    }`}
+                  >
+                    <span>Total Paid:</span>
+                    <span className="font-bold">
+                      ${bookingResult.total_paid?.toFixed(2) || "0.00"}
+                    </span>
+                  </div>
+                  <div
+                    className={`flex justify-between text-sm mt-1 ${
+                      isDarkMode ? "text-slate-300" : "text-slate-700"
+                    }`}
+                  >
+                    <span>Items Booked:</span>
+                    <span className="font-bold">
+                      {bookingResult.summary.items_booked_successfully || 0}
+                    </span>
+                  </div>
+                </div>
+              )}
+
+              {/* Close Button */}
+              <button
+                onClick={() => setShowSuccessModal(false)}
+                className="w-full py-3 rounded-xl bg-visa-blue text-white font-semibold hover:bg-visa-blue/90 transition-colors"
+              >
+                Done
+              </button>
             </motion.div>
           </motion.div>
         )}

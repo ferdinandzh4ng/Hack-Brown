@@ -9,4 +9,6 @@ langgraph
 google-auth
 google-generativeai
 pytz
+cryptography
+requests
 

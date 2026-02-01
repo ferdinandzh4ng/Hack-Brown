@@ -866,6 +866,59 @@ class LoginManager:
         except Exception as e:
             print(f"Error checking payment methods: {e}")
             return False
+    
+    def get_default_payment_method_for_processing(self, user_id: str) -> Optional[Dict]:
+        """
+        Get the default payment method with decrypted card details for payment processing.
+        WARNING: Only use this for actual payment processing, not for display.
+        
+        Args:
+            user_id: MongoDB ObjectId as string
+            
+        Returns:
+            Dict with decrypted card details or None if no payment method found
+        """
+        if self.db is None:
+            return None
+        
+        try:
+            from bson.objectid import ObjectId
+            payment_methods_collection = self.db["payment_methods"]
+            
+            # Get default payment method, or first one if no default
+            method = payment_methods_collection.find_one(
+                {"user_id": ObjectId(user_id), "is_default": True}
+            )
+            
+            if not method:
+                # Get first payment method if no default
+                method = payment_methods_collection.find_one(
+                    {"user_id": ObjectId(user_id)}
+                )
+            
+            if not method:
+                return None
+            
+            # Decrypt card details
+            card_number = self._decrypt_payment_data(method.get("card_number_encrypted", ""))
+            cvv = self._decrypt_payment_data(method.get("cvv_encrypted", ""))
+            
+            if not card_number or not cvv:
+                return None
+            
+            return {
+                "payment_method_id": str(method["_id"]),
+                "card_number": card_number,
+                "cvv": cvv,
+                "expiry_date": method.get("expiry_date", ""),
+                "cardholder_name": method.get("cardholder_name", ""),
+                "billing_address": method.get("billing_address", {}),
+                "last_4": method.get("last_4", card_number[-4:] if len(card_number) >= 4 else "****")
+            }
+            
+        except Exception as e:
+            print(f"Error getting payment method for processing: {e}")
+            return None
 
 
 # Example usage

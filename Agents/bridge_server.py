@@ -242,6 +242,7 @@ class ScheduleRequest(BaseModel):
     location: str
     start_time: str  # ISO 8601 format
     end_time: str    # ISO 8601 format
+    user_id: Optional[str] = None  # Optional user ID for preference-based planning
 
 class ScheduleResponse(BaseModel):
     success: bool
@@ -251,6 +252,7 @@ class ScheduleResponse(BaseModel):
 class BookingRequest(BaseModel):
     items: List[dict]  # List of itinerary items
     location: str
+    user_id: Optional[str] = None  # Optional user ID for payment processing
 
 class BookingResponse(BaseModel):
     success: bool
@@ -289,7 +291,8 @@ async def call_gemini_fallback(
     user_request: str,
     location: str,
     start_time: str,
-    end_time: str
+    end_time: str,
+    user_id: Optional[str] = None
 ) -> dict:
     """Call Gemini fallback with extracted activities and budget"""
     if not GEMINI_FALLBACK_AVAILABLE:
@@ -301,14 +304,15 @@ async def call_gemini_fallback(
     try:
         activities, budget = extract_activities_and_budget(user_request)
         
-        print(f"Calling Gemini fallback with: location={location}, budget={budget}, activities={activities}")
+        print(f"Calling Gemini fallback with: location={location}, budget={budget}, activities={activities}, user_id={user_id}")
         gemini_result = generate_schedule_with_gemini(
             location=location,
             budget=budget,
             interest_activities=activities,
             start_time=start_time,
             end_time=end_time,
-            user_request=user_request
+            user_request=user_request,
+            user_id=user_id
         )
         
         if gemini_result and not gemini_result.get("error"):
@@ -599,7 +603,8 @@ async def send_to_orchestrator(user_request: str, location: str, start_time: str
                 user_request=user_request,
                 location=location,
                 start_time=start_time,
-                end_time=end_time
+                end_time=end_time,
+                user_id=None  # user_id not available in this context
             )
             if gemini_result and not gemini_result.get("error"):
                 return gemini_result
@@ -638,6 +643,19 @@ async def create_schedule(request: ScheduleRequest):
             request.end_time
         )
         
+        # If orchestrator fails and we have user_id, try gemini fallback with preferences
+        if "error" in response and request.user_id:
+            print(f"Orchestrator failed, trying Gemini fallback with user preferences...")
+            gemini_result = await call_gemini_fallback(
+                user_request=request.user_request,
+                location=request.location,
+                start_time=request.start_time,
+                end_time=request.end_time,
+                user_id=request.user_id
+            )
+            if gemini_result and not gemini_result.get("error"):
+                return ScheduleResponse(success=True, data=gemini_result)
+        
         if "error" in response:
             return ScheduleResponse(success=False, error=response["error"])
         
@@ -651,7 +669,7 @@ async def health_check():
     """Health check endpoint"""
     return {"status": "ok", "orchestrator_address": ORCHESTRATOR_AGENT_ADDRESS}
 
-async def send_to_booking_agent(items: List[dict], location: str) -> dict:
+async def send_to_booking_agent(items: List[dict], location: str, user_id: Optional[str] = None) -> dict:
     """Send booking request to booking agent via HTTP (direct call, no mailbox needed)"""
     # Get booking agent HTTP URL from env or use default
     booking_url = os.getenv("BOOKING_AGENT_HTTP_URL", "http://localhost:8007/api/booking")
@@ -663,9 +681,12 @@ async def send_to_booking_agent(items: List[dict], location: str) -> dict:
             print(f"Sending booking request to {booking_url}")
             
             async with aiohttp.ClientSession() as session:
+                payload = {"items": items, "location": location}
+                if user_id:
+                    payload["user_id"] = user_id
                 async with session.post(
                     booking_url,
-                    json={"items": items, "location": location},
+                    json=payload,
                     timeout=aiohttp.ClientTimeout(total=30)
                 ) as response:
                     if response.status != 200:
@@ -685,9 +706,12 @@ async def send_to_booking_agent(items: List[dict], location: str) -> dict:
             print(f"Sending booking request to {booking_url} (using requests)")
             
             def make_request():
+                payload = {"items": items, "location": location}
+                if user_id:
+                    payload["user_id"] = user_id
                 return requests.post(
                     booking_url,
-                    json={"items": items, "location": location},
+                    json=payload,
                     timeout=30
                 )
             
@@ -723,7 +747,7 @@ async def create_booking(request: BookingRequest):
             raise HTTPException(status_code=400, detail="location is required")
         
         # Send request to booking agent
-        response = await send_to_booking_agent(request.items, request.location)
+        response = await send_to_booking_agent(request.items, request.location, request.user_id)
         
         if "error" in response:
             return BookingResponse(success=False, error=response["error"])
