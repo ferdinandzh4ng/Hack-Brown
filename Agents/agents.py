@@ -296,6 +296,14 @@ async def handle_message(ctx: Context, sender: str, msg: ChatMessage):
             original_message_key = f"original_message_{ctx.session}"
             ctx.storage.set(original_message_key, message_text)
             
+            # Store sender again before sending structured output request
+            # This ensures we have it when the response comes back (session might change)
+            ctx.storage.set(str(ctx.session), sender)
+            ctx.storage.set(f"last_sender_{ctx.session}", sender)
+            ctx.storage.set("most_recent_sender", sender)
+            ctx.storage.set(f"struct_output_sender_{ctx.session}", sender)
+            ctx.logger.info(f"Stored sender {sender} for session {ctx.session} before structured output request")
+            
             # Extract time information from user's text (as fallback if not in JSON)
             extracted_start_time, extracted_end_time = extract_times_from_text(message_text)
             if extracted_start_time or extracted_end_time:
@@ -333,6 +341,8 @@ async def handle_structured_output_response(
 ):
     ctx.logger.info(f'Here is the message from structured output {msg.output}')
     ctx.logger.info(f'Current session when receiving structured output: {ctx.session}')
+    ctx.logger.info(f'Structured output sender: {sender}')
+    
     # Try to get session sender - try multiple keys in case session changed
     session_sender = ctx.storage.get(str(ctx.session))
     if session_sender is None:
@@ -340,13 +350,49 @@ async def handle_structured_output_response(
         session_sender = ctx.storage.get(f"last_sender_{ctx.session}")
         ctx.logger.info(f'Session sender not found with primary key, trying alternative: {session_sender}')
     
-    ctx.logger.info(f'Session sender retrieved from storage: {session_sender}')
+    # If still not found, try to get from a stored mapping of structured output requests
+    if session_sender is None:
+        # Try to find the most recent sender stored
+        # Look for any key that might contain a sender
+        try:
+            # Try common patterns
+            all_keys = list(ctx.storage.keys()) if hasattr(ctx.storage, 'keys') else []
+            ctx.logger.info(f'Available storage keys: {all_keys[:20]}...')  # Log first 20 keys
+            
+            # Try to find sender from recent structured output request mapping
+            struct_output_sender_key = f"struct_output_sender_{ctx.session}"
+            session_sender = ctx.storage.get(struct_output_sender_key)
+            if session_sender:
+                ctx.logger.info(f'Found sender from structured output mapping: {session_sender}')
+        except Exception as e:
+            ctx.logger.warning(f'Error checking storage keys: {e}')
+    
+    # Last resort: if we have a sender from the message, check if it's a valid agent address
+    # (though this is usually the structured output service, not the original sender)
+    if session_sender is None:
+        ctx.logger.warning(
+            "No session sender found in storage - this might be a stale structured output response"
+        )
+        ctx.logger.warning(f"Session: {ctx.session}, Structured output sender: {sender}")
+        # Try to log what's actually in storage for debugging
+        try:
+            # Check if there's a recent sender we can use
+            # Look for the most recent message sender
+            recent_sender = ctx.storage.get("most_recent_sender")
+            if recent_sender:
+                ctx.logger.info(f'Using most recent sender as fallback: {recent_sender}')
+                session_sender = recent_sender
+        except Exception as e:
+            ctx.logger.error(f'Error in fallback sender lookup: {e}')
+    
     if session_sender is None:
         ctx.logger.error(
             "Discarding message because no session sender found in storage"
         )
-        ctx.logger.error(f"Available storage keys might not include session: {ctx.session}")
+        ctx.logger.error(f"Session: {ctx.session}, Available storage might not include session keys")
         return
+    
+    ctx.logger.info(f'Session sender retrieved: {session_sender}')
     
     if "<UNKNOWN>" in str(msg.output):
         error_msg = create_text_chat(

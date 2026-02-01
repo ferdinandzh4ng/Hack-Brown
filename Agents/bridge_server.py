@@ -87,8 +87,12 @@ chat_proto = Protocol(spec=chat_protocol_spec)
 @chat_proto.on_message(ChatMessage)
 async def handle_message(ctx: Context, sender: str, msg: ChatMessage):
     """Handle response from orchestrator - filter out stale messages"""
+    ctx.logger.info(f"Bridge received message from {sender[:20]}... (orchestrator: {ORCHESTRATOR_AGENT_ADDRESS[:20]}...)")
+    
     # Check if this is a response from orchestrator
     if sender == ORCHESTRATOR_AGENT_ADDRESS:
+        ctx.logger.info(f"Message is from orchestrator, processing...")
+        
         # Check if message is stale (older than 5 minutes)
         # Handle both timezone-aware and timezone-naive timestamps
         try:
@@ -106,12 +110,16 @@ async def handle_message(ctx: Context, sender: str, msg: ChatMessage):
         except Exception as e:
             ctx.logger.warning(f"Error checking message age: {e}, proceeding with message")
         
-        # Only process if we have a pending request (within last 2 minutes)
+        # Check if we have a pending request (within last 2 minutes)
+        # But don't block if we don't have last_request_time - might be a legitimate response
         if bridge_state.last_request_time:
             time_since_request = (datetime.now(timezone.utc) - bridge_state.last_request_time).total_seconds()
             if time_since_request > 120:  # 2 minutes
-                ctx.logger.warning(f"Ignoring message - no recent request (last request: {time_since_request:.0f}s ago)")
-                return
+                ctx.logger.warning(f"Message received but last request was {time_since_request:.0f}s ago - might be stale, but processing anyway")
+            else:
+                ctx.logger.info(f"Message received within request window ({time_since_request:.0f}s since request)")
+        else:
+            ctx.logger.warning(f"Received message but no last_request_time set - processing anyway (might be from previous session)")
         
         # Extract text content
         response_text = ""
@@ -120,15 +128,24 @@ async def handle_message(ctx: Context, sender: str, msg: ChatMessage):
                 response_text = item.text
                 break
         
+        ctx.logger.info(f"Extracted response text: {len(response_text)} chars")
+        
         # Put response in queue
         if response_text and bridge_state.response_queue is not None:
             try:
                 await bridge_state.response_queue.put(response_text)
-                ctx.logger.info(f"Received response from orchestrator: {len(response_text)} chars")
+                ctx.logger.info(f"Successfully queued response from orchestrator: {len(response_text)} chars")
             except Exception as e:
                 ctx.logger.error(f"Error putting response in queue: {e}")
                 import traceback
                 ctx.logger.error(traceback.format_exc())
+        else:
+            if not response_text:
+                ctx.logger.error("No text content in response message")
+            if bridge_state.response_queue is None:
+                ctx.logger.error("Response queue is None - cannot queue response")
+    else:
+        ctx.logger.debug(f"Ignoring message from non-orchestrator sender: {sender[:20]}...")
 
 # Interval handler to process send queue
 @bridge_agent.on_interval(period=0.5)

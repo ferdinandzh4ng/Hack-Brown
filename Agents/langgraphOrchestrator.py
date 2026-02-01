@@ -618,21 +618,32 @@ def combine_outputs_node(state: OrchestratorState) -> OrchestratorState:
     try:
         budget_filter = state.get("budget_filter_response", {})
         
+        # Log what we got from budget filter
+        print(f"[Combine Outputs] Budget filter response type: {type(budget_filter)}")
+        print(f"[Combine Outputs] Budget filter response keys: {list(budget_filter.keys()) if isinstance(budget_filter, dict) else 'not a dict'}")
+        print(f"[Combine Outputs] Budget filter has error: {budget_filter.get('error') if isinstance(budget_filter, dict) else 'N/A'}")
+        
         # Use filtered output if available, otherwise return error
         if budget_filter and not budget_filter.get("error"):
             # Return just the budget filter output - it contains everything needed
             state["final_output"] = budget_filter
+            print(f"[Combine Outputs] Set final_output from budget_filter: {len(str(budget_filter))} chars")
         else:
             # If filter failed, return error response
+            error_msg = budget_filter.get("error", "Budget filter not executed") if isinstance(budget_filter, dict) else "Budget filter response is invalid"
             state["final_output"] = {
                 "type": "error",
-                "message": budget_filter.get("error", "Budget filter not executed"),
+                "message": error_msg,
                 "location": state.get("location", ""),
                 "budget": state.get("budget", 0)
             }
+            print(f"[Combine Outputs] Set final_output to error: {error_msg}")
         
         return state
     except Exception as e:
+        print(f"[Combine Outputs] Error: {e}")
+        import traceback
+        print(traceback.format_exc())
         state["error"] = f"Combine outputs error: {str(e)}"
         return state
 
@@ -741,12 +752,34 @@ def get_or_create_workflow(ctx: Context) -> Any:
 @chat_proto.on_message(ChatMessage)
 async def handle_user_message(ctx: Context, sender: str, msg: ChatMessage):
     """Handle incoming user messages and orchestrate workflow"""
+    
+    # FIRST: Check if this is from one of our target agents - ignore immediately
+    # With send_and_receive, responses should be handled automatically
+    # ALL messages from target agents should be ignored - they're either duplicates or stale
+    if sender in [INTENT_DISPATCHER_AGENT_ADDRESS, FUND_ALLOCATION_AGENT_ADDRESS, EVENTS_SCRAPER_AGENT_ADDRESS, BUDGET_FILTER_AGENT_ADDRESS]:
+        # Check message age - if it's old, definitely ignore
+        try:
+            now = datetime.now(timezone.utc)
+            msg_time = msg.timestamp
+            if msg_time.tzinfo is None:
+                msg_time = msg_time.replace(tzinfo=timezone.utc)
+            message_age = (now - msg_time).total_seconds()
+            if message_age > 60:  # Older than 1 minute - definitely stale
+                return  # Ignore silently
+        except Exception:
+            pass
+        
+        # Even if recent, ignore ALL messages from target agents
+        # send_and_receive handles responses, so any message here is a duplicate or unexpected
+        return  # Ignore silently - no logging to reduce noise
+    
+    # Now log the message (only if it's from a user, not a target agent)
     ctx.logger.info(f"=== Orchestrator received ChatMessage ===")
     ctx.logger.info(f"Sender: {sender}")
     ctx.logger.info(f"Orchestrator's own address: {ctx.agent.address}")
     ctx.logger.info(f"Message ID: {msg.msg_id}")
     
-    # Check if message is stale (older than 5 minutes)
+    # Check if message is stale (older than 2 minutes) - be stricter to prevent old request floods
     # Handle both timezone-aware and timezone-naive timestamps
     try:
         now = datetime.now(timezone.utc)
@@ -757,11 +790,56 @@ async def handle_user_message(ctx: Context, sender: str, msg: ChatMessage):
             msg_time = msg_time.replace(tzinfo=timezone.utc)
         
         message_age = (now - msg_time).total_seconds()
-        if message_age > 300:  # 5 minutes
-            ctx.logger.warning(f"Ignoring stale message (age: {message_age:.0f}s, ID: {msg.msg_id})")
+        if message_age > 120:  # 2 minutes - stricter threshold
+            ctx.logger.info(f"Ignoring stale message (age: {message_age:.0f}s, ID: {msg.msg_id})")
             return
     except Exception as e:
         ctx.logger.warning(f"Error checking message age: {e}, proceeding with message")
+    
+    # Track processed message IDs to prevent duplicate processing
+    processed_messages_key = "processed_message_ids"
+    processed_ids_dict = ctx.storage.get(processed_messages_key) or {}
+    
+    # Clean old message IDs - remove entries older than 10 minutes and keep only last 50
+    now_iso = datetime.now(timezone.utc).isoformat()
+    now_dt = datetime.now(timezone.utc)
+    cleaned_dict = {}
+    for msg_id, timestamp_str in processed_ids_dict.items():
+        try:
+            timestamp_dt = datetime.fromisoformat(timestamp_str.replace('Z', '+00:00'))
+            age = (now_dt - timestamp_dt).total_seconds()
+            if age < 600:  # Keep if less than 10 minutes old
+                cleaned_dict[msg_id] = timestamp_str
+        except Exception:
+            # Invalid timestamp, skip it
+            continue
+    
+    # If still too many, keep only most recent 50
+    if len(cleaned_dict) > 50:
+        sorted_ids = sorted(cleaned_dict.items(), key=lambda x: x[1], reverse=True)[:50]
+        cleaned_dict = dict(sorted_ids)
+        ctx.logger.info(f"Cleared old processed message IDs, keeping {len(cleaned_dict)} most recent")
+    
+    processed_ids_dict = cleaned_dict
+    
+    # Check if we've already processed this message
+    msg_id_str = str(msg.msg_id)
+    if msg_id_str in processed_ids_dict:
+        # Check if it's recent (within last 5 minutes)
+        try:
+            last_processed_time = processed_ids_dict[msg_id_str]
+            last_processed_dt = datetime.fromisoformat(last_processed_time.replace('Z', '+00:00'))
+            time_since_processed = (now_dt - last_processed_dt).total_seconds()
+            if time_since_processed < 300:  # 5 minutes
+                ctx.logger.debug(f"Ignoring duplicate message (ID: {msg.msg_id}, processed {time_since_processed:.0f}s ago)")
+                return
+        except Exception:
+            # Can't parse timestamp, remove it and continue
+            del processed_ids_dict[msg_id_str]
+    
+    # Mark this message as processed with timestamp
+    processed_ids_dict[msg_id_str] = now_iso
+    ctx.storage.set(processed_messages_key, processed_ids_dict)
     
     # Log message content
     user_input_preview = ""
@@ -771,25 +849,6 @@ async def handle_user_message(ctx: Context, sender: str, msg: ChatMessage):
             ctx.logger.info(f"Message content preview: {user_input_preview}...")
             break
     
-    # Check if this is from one of our target agents (shouldn't happen with send_and_receive, but handle just in case)
-    # These are late/duplicate responses that should be ignored
-    if sender in [INTENT_DISPATCHER_AGENT_ADDRESS, FUND_ALLOCATION_AGENT_ADDRESS, EVENTS_SCRAPER_AGENT_ADDRESS, BUDGET_FILTER_AGENT_ADDRESS]:
-        # Check if message is stale
-        try:
-            now = datetime.now(timezone.utc)
-            msg_time = msg.timestamp
-            if msg_time.tzinfo is None:
-                msg_time = msg_time.replace(tzinfo=timezone.utc)
-            message_age = (now - msg_time).total_seconds()
-            if message_age > 60:  # Older than 1 minute - definitely stale
-                ctx.logger.warning(f"Ignoring stale late response from target agent {sender[:20]}... (age: {message_age:.0f}s)")
-                return
-        except Exception:
-            pass
-        
-        ctx.logger.warning(f"Received unexpected message from target agent {sender[:20]}... This shouldn't happen with send_and_receive - message may be a late response or duplicate. Ignoring.")
-        # Don't process as user input - just ignore it
-        return
     
     # Check for stale error messages - ignore error messages that look like they're from previous requests
     if user_input_preview:
@@ -801,7 +860,19 @@ async def handle_user_message(ctx: Context, sender: str, msg: ChatMessage):
             "parse input string"  # This is the specific error from the terminal output
         ]
         if any(indicator in user_input_preview for indicator in error_indicators):
-            ctx.logger.warning(f"Ignoring stale error message: {user_input_preview[:100]}")
+            ctx.logger.info(f"Ignoring stale error message: {user_input_preview[:100]}")
+            return
+        
+        # Check if the message looks like old response data from agents
+        # Fund allocation responses have "activities" with "activity" and "cost" fields
+        # Budget filter responses have "activities" with "start_time" and scheduled data
+        response_indicators = [
+            '"activities":' in user_input_preview and '"leftover_budget"' in user_input_preview,  # Fund allocation response
+            '"activities":' in user_input_preview and '"start_time":' in user_input_preview,  # Budget filter response
+            '"activity":' in user_input_preview and '"cost":' in user_input_preview,  # Fund allocation format
+        ]
+        if any(response_indicators):
+            ctx.logger.info(f"Ignoring message that looks like old agent response data")
             return
     
     # Otherwise, this is a user message - send acknowledgement
@@ -955,12 +1026,21 @@ async def handle_user_message(ctx: Context, sender: str, msg: ChatMessage):
         final_output = final_state.get("final_output", {})
         output_text = json.dumps(final_output, indent=2)
         
+        ctx.logger.info(f"Sending final output to sender: {sender[:20]}... ({len(output_text)} chars)")
+        ctx.logger.info(f"Final output preview: {output_text[:200]}...")
+        
         response_msg = create_text_chat(
             output_text,
             end_session=final_output.get("type") != "clarification_needed"
         )
         
-        await ctx.send(sender, response_msg)
+        try:
+            await ctx.send(sender, response_msg)
+            ctx.logger.info(f"Successfully sent response to {sender[:20]}...")
+        except Exception as send_err:
+            ctx.logger.error(f"Failed to send response: {send_err}")
+            import traceback
+            ctx.logger.error(traceback.format_exc())
         
     except Exception as e:
         ctx.logger.error(f"Orchestrator error: {e}")
@@ -1003,6 +1083,23 @@ def create_text_chat(text: str, end_session: bool = False) -> ChatMessage:
 # Include chat protocol
 agent.include(chat_proto, publish_manifest=True)
 
+# Cleanup handler that runs once on startup
+_startup_cleanup_done = False
+
+@agent.on_interval(period=1.0)
+async def startup_cleanup_once(ctx: Context):
+    """Clean up old processed message IDs once on startup"""
+    global _startup_cleanup_done
+    if _startup_cleanup_done:
+        return  # Only run once
+    
+    _startup_cleanup_done = True
+    processed_messages_key = "processed_message_ids"
+    old_ids = ctx.storage.get(processed_messages_key)
+    if old_ids:
+        ctx.storage.set(processed_messages_key, {})
+        ctx.logger.info(f"Cleared {len(old_ids)} old processed message IDs on startup")
+
 if __name__ == "__main__":
     print(f"LangGraph Orchestrator Agent address: {agent.address}")
     print(f"Intent Dispatcher Agent address: {INTENT_DISPATCHER_AGENT_ADDRESS}")
@@ -1010,5 +1107,6 @@ if __name__ == "__main__":
     print(f"Events Scraper Agent address: {EVENTS_SCRAPER_AGENT_ADDRESS}")
     print(f"Budget Filter Agent address: {BUDGET_FILTER_AGENT_ADDRESS}")
     print("\nStarting orchestrator agent...")
+    print("Will clear old processed message IDs on startup...")
     agent.run()
 

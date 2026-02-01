@@ -418,8 +418,34 @@ def parse_duration(duration_str: str) -> int:
     return minutes if minutes > 0 else 60  # Default to 1 hour
 
 
+def estimate_transit_time_quick(from_address: str, to_address: str, location: str) -> int:
+    """Quickly estimate transit time between two addresses (in minutes) without full API call"""
+    if not from_address or not to_address or from_address == to_address:
+        return 0
+    
+    # Quick heuristic: if addresses are very similar (same street, nearby numbers), assume walking
+    from_parts = from_address.lower().split()
+    to_parts = to_address.lower().split()
+    
+    # Check if they're on the same street
+    common_words = set(from_parts) & set(to_parts)
+    if len(common_words) >= 2:  # Same street name and city
+        return 10  # Assume 10 min walk
+    
+    # Otherwise, use AI to estimate (but cache results)
+    return None  # Signal to use full research_transit
+
+
 def research_transit(from_address: str, to_address: str, location: str) -> Dict:
     """Research best transit method between two addresses using AI"""
+    if not from_address or not to_address or from_address == to_address:
+        return {
+            "method": "walking",
+            "duration_minutes": 0,
+            "cost_usd": 0.0,
+            "description": "Same location"
+        }
+    
     try:
         prompt = f"""Research the best transportation method between these two locations in {location}:
 
@@ -438,7 +464,8 @@ Consider:
 - Walking if under 1 mile (15-20 min walk)
 - Public transit (bus, subway, train) if available and efficient
 - Driving/taxi/rideshare for longer distances or when public transit is inconvenient
-- Cost should be realistic for the location and method"""
+- Cost should be realistic for the location and method
+- If locations are very far apart (more than 30 miles), transit should be at least 45-60 minutes"""
         
         response = client.chat.completions.create(
             model="asi1-mini",
@@ -450,6 +477,13 @@ Consider:
         )
         
         result = json.loads(response.choices[0].message.content)
+        
+        # Cap transit time at reasonable maximum (2 hours)
+        if result.get("duration_minutes", 0) > 120:
+            result["duration_minutes"] = 120
+            result["method"] = "driving"
+            result["description"] = "Long distance travel"
+        
         return result
     except Exception as e:
         print(f"Error researching transit: {e}")
@@ -535,6 +569,11 @@ def schedule_activities(venues: List[Dict], all_available_venues: Dict[str, List
             transit_cost = transit_info.get("cost_usd", 0.0)
             transit_method = transit_info.get("method", "walking")
             
+            # Cap transit duration at reasonable maximum
+            if transit_duration > 120:  # More than 2 hours is unreasonable
+                transit_duration = 120
+                transit_method = "driving"
+            
             if (current_time + timedelta(minutes=transit_duration)) <= end_datetime:
                 transit_activity = {
                     "type": "transit",
@@ -608,8 +647,22 @@ def schedule_activities(venues: List[Dict], all_available_venues: Dict[str, List
                 act_duration = parse_duration(activity.get("duration", "1 hour"))
                 act_cost = activity.get("cost", 0)
                 
-                # Estimate transit time
-                transit_time = 15 if prev_addr and act_address and prev_addr != act_address else 0
+                # Check transit time - reject if too far (more than 45 minutes)
+                transit_time = 0
+                if prev_addr and act_address and prev_addr != act_address:
+                    # Quick estimate first
+                    quick_estimate = estimate_transit_time_quick(prev_addr, act_address, location)
+                    if quick_estimate is not None:
+                        transit_time = quick_estimate
+                    else:
+                        # Need to check actual transit time
+                        transit_info = research_transit(prev_addr, act_address, location)
+                        transit_time = transit_info.get("duration_minutes", 15)
+                    
+                    # Reject activities that are too far away
+                    if transit_time > 45:  # More than 45 minutes transit is too far
+                        continue
+                
                 total_needed = transit_time + act_duration
                 
                 # Check budget including reserved meal costs
@@ -704,8 +757,32 @@ def schedule_activities(venues: List[Dict], all_available_venues: Dict[str, List
     remaining_time = (end_datetime - current_time).total_seconds() / 60
     remaining_budget = budget - total_cost
     
-    # Sort other activities by duration (shorter first to pack more)
-    other_activities.sort(key=lambda v: parse_duration(v.get("duration", "1 hour")))
+    # Sort other activities by proximity first, then duration (shorter first to pack more)
+    # Prioritize activities closer to current location to minimize transit
+    if scheduled:
+        current_location = scheduled[-1].get("address", "")
+        if current_location:
+            # Sort by: 1) proximity (estimated), 2) duration, 3) cost
+            def sort_key(activity):
+                act_address = activity.get("address", "")
+                if act_address and current_location and act_address != current_location:
+                    # Quick proximity check - same street/city = closer
+                    from_parts = set(current_location.lower().split())
+                    to_parts = set(act_address.lower().split())
+                    common = len(from_parts & to_parts)
+                    proximity_score = -common  # Negative so more common = higher priority
+                else:
+                    proximity_score = 0  # Same location or no address
+                
+                duration = parse_duration(activity.get("duration", "1 hour"))
+                cost = activity.get("cost", 0)
+                return (proximity_score, duration, cost)
+            
+            other_activities.sort(key=sort_key)
+        else:
+            other_activities.sort(key=lambda v: parse_duration(v.get("duration", "1 hour")))
+    else:
+        other_activities.sort(key=lambda v: parse_duration(v.get("duration", "1 hour")))
     
     # First, use up all activities from the original list
     while remaining_time > 10 and remaining_budget > 5 and other_activities:
@@ -724,8 +801,20 @@ def schedule_activities(venues: List[Dict], all_available_venues: Dict[str, List
             act_duration = parse_duration(activity.get("duration", "1 hour"))
             act_cost = activity.get("cost", 0)
             
-            # Estimate transit
-            transit_time = 15 if prev_addr and act_address and prev_addr != act_address else 0
+            # Check transit time - reject if too far (more than 45 minutes)
+            transit_time = 0
+            if prev_addr and act_address and prev_addr != act_address:
+                quick_estimate = estimate_transit_time_quick(prev_addr, act_address, location)
+                if quick_estimate is not None:
+                    transit_time = quick_estimate
+                else:
+                    transit_info = research_transit(prev_addr, act_address, location)
+                    transit_time = transit_info.get("duration_minutes", 15)
+                
+                # Reject activities that are too far away
+                if transit_time > 45:
+                    continue
+            
             total_needed = transit_time + act_duration
             
             if (temp_time + timedelta(minutes=total_needed)) <= end_datetime and (temp_cost + act_cost) <= budget:
@@ -822,7 +911,20 @@ def schedule_activities(venues: List[Dict], all_available_venues: Dict[str, List
                 venue_address = venue.get("address", "")
                 venue_duration = parse_duration(venue.get("duration", "1 hour"))
                 
-                transit_time = 15 if prev_addr and venue_address and prev_addr != venue_address else 0
+                # Check transit time - reject if too far (more than 45 minutes)
+                transit_time = 0
+                if prev_addr and venue_address and prev_addr != venue_address:
+                    quick_estimate = estimate_transit_time_quick(prev_addr, venue_address, location)
+                    if quick_estimate is not None:
+                        transit_time = quick_estimate
+                    else:
+                        transit_info = research_transit(prev_addr, venue_address, location)
+                        transit_time = transit_info.get("duration_minutes", 15)
+                    
+                    # Reject venues that are too far away
+                    if transit_time > 45:
+                        continue
+                
                 total_needed = transit_time + venue_duration
                 
                 if (temp_time + timedelta(minutes=total_needed)) <= end_datetime and (temp_cost + venue_cost) <= budget:
