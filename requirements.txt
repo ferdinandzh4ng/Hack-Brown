@@ -5,4 +5,5 @@ python-dotenv
 pymongo
 fastapi
 uvicorn
+langgraph
 

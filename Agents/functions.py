@@ -527,6 +527,9 @@ def check_vagueness(user_text: str) -> dict:
         # Default to vague if we can't check, so we prompt the user
         # Try to extract location from text as fallback
         import re
+        # Ensure user_text is a string before using regex
+        if not isinstance(user_text, str):
+            user_text = str(user_text)
         location_match = re.search(r'\b(?:in|at|to|visit|visit|going to|trip to)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)', user_text, re.IGNORECASE)
         location = location_match.group(1) if location_match else None
         return {"is_vague": True, "location": location, "reason": "Error checking - defaulting to vague"}
@@ -839,6 +842,10 @@ def dispatch_intent(user_request: str, sender: str, conversation_state: Optional
         is_vague = vagueness_result.get("is_vague", False)
         location = vagueness_result.get("location")
         
+        # Ensure user_request is a string before string operations
+        if not isinstance(user_request, str):
+            user_request = str(user_request)
+        
         # Also check if this looks like a general planning request (contains words like "plan", "itinerary", "day in")
         is_planning_request = any(word in user_request.lower() for word in ["plan", "itinerary", "day in", "visit", "trip to"])
         
@@ -848,6 +855,11 @@ def dispatch_intent(user_request: str, sender: str, conversation_state: Optional
             # If location wasn't extracted, try to extract it from text
             if not location:
                 import re
+                # Ensure user_request is a string before using regex
+                if isinstance(user_request, dict):
+                    user_request = str(user_request)
+                elif not isinstance(user_request, str):
+                    user_request = str(user_request)
                 # Try to find location patterns like "in New York", "visit Paris", "trip to Tokyo"
                 location_match = re.search(r'\b(?:in|at|to|visit|trip to|going to)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)', user_request, re.IGNORECASE)
                 if location_match:

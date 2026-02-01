@@ -14,6 +14,7 @@ from datetime import datetime
 from uuid import uuid4
 import json
 import os
+import re
 from dotenv import load_dotenv
 from openai import OpenAI
 
@@ -66,35 +67,50 @@ client = OpenAI(
 # ============================================================
 
 ACTIVITY_SCRAPER_PROMPT = """
-You are an expert travel activity scraper and curator. Given a location, timeframe, budget, and user interests, 
-generate a comprehensive list of activities and experiences available in that location.
+You are an expert travel researcher and activity curator. Your job is to RESEARCH and find REAL, SPECIFIC venues and activities in the given location.
+
+CRITICAL REQUIREMENTS:
+1. You MUST research the actual location and find REAL venues that exist there. Do NOT make up or guess venues.
+2. Return SPECIFIC, REAL venues - not generic activities. Examples:
+   - For "eat" or "dining": Research actual restaurants in the location like "The Cheesecake Factory", "Olive Garden", local popular restaurants, etc.
+   - For "shop": Research actual malls like "Westfield Mall", "The Galleria", specific stores like "Nike Store", "Apple Store", etc.
+   - For "sightsee": Research actual landmarks like "Empire State Building", "Golden Gate Bridge", "Times Square", etc.
+   - For "adventure": Research actual venues like "Sky Zone Trampoline Park", "Rock Climbing Gym", etc.
+
+3. ALL addresses MUST be REAL, VERIFIABLE addresses in the specified location. Research actual street addresses.
+   Format: "Street Number Street Name, City, State ZIP" or "Street Number Street Name, City, Country"
+   Example: "350 5th Ave, New York, NY 10118" or "100 Queen St W, Toronto, ON M5H 2N2"
+
+4. Descriptions should be 2-3 sentences describing what makes this specific venue unique, what you can do there, and why it's worth visiting.
+
+5. Research popular, well-known venues that are actually in the specified location. Use your knowledge of real places.
 
 For each activity, provide:
-1. Name of the activity/event
+1. Name of the SPECIFIC venue/restaurant/mall/landmark (must be a real, specific place that exists in the location)
 2. Category (must match or relate to one of the user's interests)
-3. Description (2-3 sentences)
-4. Estimated cost in USD
+3. Description (2-3 sentences about this specific place - what it offers, atmosphere, specialties)
+4. Estimated cost in USD (per person or per activity) - research typical costs
 5. Duration (e.g., "2 hours", "half day", "full day")
 6. Best time to do it (morning/afternoon/evening/flexible)
 7. Difficulty level (easy/moderate/challenging)
-8. Address (if known)
-9. Phone number (if known)
-10. Website URL (if known)
+8. Address (REQUIRED - must be a real, verifiable address in the location)
+9. Phone number (if known - use real format)
+10. Website URL (if known - use real URLs)
 
 Return ONLY valid JSON in this format:
 {{
   "activities": [
     {{
-      "name": "Activity Name",
+      "name": "Specific Venue Name (e.g., 'The Cheesecake Factory', 'Westfield Century City', 'Central Park')",
       "category": "activity_type",
-      "description": "Description of the activity",
+      "description": "2-3 sentences describing this specific place - what makes it special, what you can do there, atmosphere, specialties",
       "estimated_cost": 45.00,
       "duration": "2 hours",
       "best_time": "morning",
       "difficulty": "moderate",
-      "address": "123 Main St, City, State",
+      "address": "REAL street address in the location (e.g., '350 5th Ave, New York, NY 10118')",
       "phone": "+1-555-123-4567",
-      "url": "https://example.com"
+      "url": "https://real-website.com"
     }}
   ],
   "total_budget_analysis": {{
@@ -109,9 +125,14 @@ Return ONLY valid JSON in this format:
   ]
 }}
 
-IMPORTANT: Generate exactly 4-5 activities/events/venues for EACH interest category provided by the user.
-Mix price ranges and difficulty levels across each category. Ensure variety within each interest type.
-Include realistic addresses and contact information where possible.
+IMPORTANT: 
+- RESEARCH the location and find REAL venues that actually exist there
+- Generate exactly 4-5 SPECIFIC, REAL venues for EACH interest category provided by the user
+- ALL addresses MUST be real, verifiable addresses in the specified location
+- Focus on specific restaurants, malls, stores, landmarks, and venues - not generic activity types
+- Mix price ranges and difficulty levels across each category
+- Ensure variety within each interest type
+- If you don't know specific venues in the location, research common/popular venues for that city
 """
 
 BUDGET_ANALYSIS_PROMPT = """
@@ -160,18 +181,32 @@ def generate_mock_activities(
             {"name": "Rock Climbing Trail", "category": "hiking", "description": "Hiking combined with scrambling and light climbing sections.", "estimated_cost": 40, "duration": "5 hours", "best_time": "morning", "difficulty": "challenging"},
         ],
         "sightseeing": [
-            {"name": "Historic Downtown Tour", "category": "sightseeing", "description": "Guided walking tour of historic architecture and cultural landmarks.", "estimated_cost": 20, "duration": "2 hours", "best_time": "afternoon", "difficulty": "easy"},
-            {"name": "Museum of Art & Culture", "category": "sightseeing", "description": "Extensive collections of regional and international artwork and artifacts.", "estimated_cost": 15, "duration": "3 hours", "best_time": "afternoon", "difficulty": "easy"},
-            {"name": "Panoramic Viewpoint", "category": "sightseeing", "description": "Stunning observation platform overlooking the city and surrounding landscape.", "estimated_cost": 10, "duration": "1 hour", "best_time": "sunset", "difficulty": "easy"},
-            {"name": "Scenic Drive Route", "category": "sightseeing", "description": "Self-guided driving tour through picturesque landscapes and scenic overlooks.", "estimated_cost": 0, "duration": "3 hours", "best_time": "flexible", "difficulty": "easy"},
-            {"name": "Local Food & Craft Market", "category": "sightseeing", "description": "Vibrant marketplace showcasing regional crafts, food, and local vendors.", "estimated_cost": 30, "duration": "2 hours", "best_time": "morning", "difficulty": "easy"},
+            {"name": "Empire State Building", "category": "sightseeing", "description": "Iconic 102-story Art Deco skyscraper offering panoramic views of New York City from the 86th and 102nd floor observatories. Historic landmark and architectural marvel.", "estimated_cost": 38, "duration": "2 hours", "best_time": "afternoon", "difficulty": "easy", "address": "350 5th Ave, New York, NY 10118", "phone": "+1-212-736-3100", "url": "https://www.esbnyc.com"},
+            {"name": "Golden Gate Bridge", "category": "sightseeing", "description": "Famous suspension bridge spanning San Francisco Bay. Walk or bike across for stunning views of the city, Alcatraz, and the Pacific Ocean.", "estimated_cost": 0, "duration": "1-2 hours", "best_time": "morning", "difficulty": "easy", "address": "Golden Gate Bridge, San Francisco, CA 94129", "phone": "+1-415-921-5858", "url": "https://www.goldengate.org"},
+            {"name": "Times Square", "category": "sightseeing", "description": "Vibrant commercial intersection known for bright billboards, Broadway theaters, and bustling energy. The heart of Manhattan's entertainment district.", "estimated_cost": 0, "duration": "1 hour", "best_time": "evening", "difficulty": "easy", "address": "Times Square, New York, NY 10036", "phone": "+1-212-768-1560", "url": "https://www.timessquarenyc.org"},
+            {"name": "Central Park", "category": "sightseeing", "description": "843-acre urban park in Manhattan featuring lakes, walking paths, gardens, and recreational facilities. Iconic green space in the heart of the city.", "estimated_cost": 0, "duration": "2-3 hours", "best_time": "morning", "difficulty": "easy", "address": "Central Park, New York, NY 10024", "phone": "+1-212-310-6600", "url": "https://www.centralparknyc.org"},
+            {"name": "Statue of Liberty", "category": "sightseeing", "description": "Symbolic monument and UNESCO World Heritage Site. Take a ferry to Liberty Island for close-up views and visit the museum inside the pedestal.", "estimated_cost": 24, "duration": "3 hours", "best_time": "morning", "difficulty": "easy", "address": "Liberty Island, New York, NY 10004", "phone": "+1-212-363-3200", "url": "https://www.nps.gov/stli"},
         ],
         "dining": [
-            {"name": "Fine Dining Restaurant", "category": "dining", "description": "Upscale culinary experience with locally-sourced ingredients and creative cuisine.", "estimated_cost": 85, "duration": "2.5 hours", "best_time": "evening", "difficulty": "easy"},
-            {"name": "Street Food Tour", "category": "dining", "description": "Guided tasting of authentic street food and local specialties.", "estimated_cost": 40, "duration": "3 hours", "best_time": "afternoon", "difficulty": "easy"},
-            {"name": "Brewery Tour & Tasting", "category": "dining", "description": "Behind-the-scenes tour of a local craft brewery with beer tastings.", "estimated_cost": 25, "duration": "2 hours", "best_time": "afternoon", "difficulty": "easy"},
-            {"name": "Farm-to-Table Dining", "category": "dining", "description": "Seasonal menu featuring fresh produce from local farms and producers.", "estimated_cost": 65, "duration": "2 hours", "best_time": "evening", "difficulty": "easy"},
-            {"name": "Cooking Class Experience", "category": "dining", "description": "Learn to prepare regional dishes from a professional chef.", "estimated_cost": 55, "duration": "3 hours", "best_time": "afternoon", "difficulty": "easy"},
+            {"name": "The Cheesecake Factory", "category": "dining", "description": "Popular American chain restaurant known for extensive menu and signature cheesecakes. Casual dining atmosphere with something for everyone.", "estimated_cost": 35, "duration": "1.5 hours", "best_time": "evening", "difficulty": "easy", "address": "10250 Santa Monica Blvd, Los Angeles, CA 90067", "phone": "+1-310-203-1000", "url": "https://www.thecheesecakefactory.com"},
+            {"name": "Olive Garden", "category": "dining", "description": "Italian-American restaurant chain offering unlimited breadsticks, pasta dishes, and Italian classics in a family-friendly setting.", "estimated_cost": 25, "duration": "1.5 hours", "best_time": "evening", "difficulty": "easy", "address": "1234 Main St, City, State 12345", "phone": "+1-555-123-4567", "url": "https://www.olivegarden.com"},
+            {"name": "Local Burger Joint", "category": "dining", "description": "Neighborhood burger spot serving handcrafted burgers, fresh-cut fries, and milkshakes. Known for locally-sourced beef and creative toppings.", "estimated_cost": 18, "duration": "1 hour", "best_time": "flexible", "difficulty": "easy", "address": "456 Oak Avenue, City, State 12345", "phone": "+1-555-234-5678", "url": "https://www.localburger.com"},
+            {"name": "Sushi House", "category": "dining", "description": "Authentic Japanese restaurant featuring fresh sushi, sashimi, and traditional dishes. Cozy atmosphere with skilled chefs preparing dishes at the bar.", "estimated_cost": 45, "duration": "2 hours", "best_time": "evening", "difficulty": "easy", "address": "789 Elm Street, City, State 12345", "phone": "+1-555-345-6789", "url": "https://www.sushihouse.com"},
+            {"name": "Farm-to-Table Bistro", "category": "dining", "description": "Upscale restaurant focusing on seasonal, locally-sourced ingredients. Creative menu changes with the seasons, featuring regional specialties.", "estimated_cost": 65, "duration": "2.5 hours", "best_time": "evening", "difficulty": "easy", "address": "321 Maple Drive, City, State 12345", "phone": "+1-555-456-7890", "url": "https://www.farmtotablebistro.com"},
+        ],
+        "eat": [
+            {"name": "The Cheesecake Factory", "category": "eat", "description": "Popular American chain restaurant known for extensive menu and signature cheesecakes. Casual dining atmosphere with something for everyone.", "estimated_cost": 35, "duration": "1.5 hours", "best_time": "evening", "difficulty": "easy", "address": "10250 Santa Monica Blvd, Los Angeles, CA 90067", "phone": "+1-310-203-1000", "url": "https://www.thecheesecakefactory.com"},
+            {"name": "Olive Garden", "category": "eat", "description": "Italian-American restaurant chain offering unlimited breadsticks, pasta dishes, and Italian classics in a family-friendly setting.", "estimated_cost": 25, "duration": "1.5 hours", "best_time": "evening", "difficulty": "easy", "address": "1234 Main St, City, State 12345", "phone": "+1-555-123-4567", "url": "https://www.olivegarden.com"},
+            {"name": "Local Burger Joint", "category": "eat", "description": "Neighborhood burger spot serving handcrafted burgers, fresh-cut fries, and milkshakes. Known for locally-sourced beef and creative toppings.", "estimated_cost": 18, "duration": "1 hour", "best_time": "flexible", "difficulty": "easy", "address": "456 Oak Avenue, City, State 12345", "phone": "+1-555-234-5678", "url": "https://www.localburger.com"},
+            {"name": "Sushi House", "category": "eat", "description": "Authentic Japanese restaurant featuring fresh sushi, sashimi, and traditional dishes. Cozy atmosphere with skilled chefs preparing dishes at the bar.", "estimated_cost": 45, "duration": "2 hours", "best_time": "evening", "difficulty": "easy", "address": "789 Elm Street, City, State 12345", "phone": "+1-555-345-6789", "url": "https://www.sushihouse.com"},
+            {"name": "Farm-to-Table Bistro", "category": "eat", "description": "Upscale restaurant focusing on seasonal, locally-sourced ingredients. Creative menu changes with the seasons, featuring regional specialties.", "estimated_cost": 65, "duration": "2.5 hours", "best_time": "evening", "difficulty": "easy", "address": "321 Maple Drive, City, State 12345", "phone": "+1-555-456-7890", "url": "https://www.farmtotablebistro.com"},
+        ],
+        "shop": [
+            {"name": "Westfield Century City", "category": "shop", "description": "Upscale shopping mall featuring over 200 stores including luxury brands, department stores, and dining options. Modern architecture with outdoor spaces.", "estimated_cost": 0, "duration": "3 hours", "best_time": "afternoon", "difficulty": "easy", "address": "10250 Santa Monica Blvd, Los Angeles, CA 90067", "phone": "+1-310-277-3898", "url": "https://www.westfield.com/centurycity"},
+            {"name": "The Galleria", "category": "shop", "description": "Large shopping center with major department stores, specialty shops, and food court. Popular destination for fashion, electronics, and home goods.", "estimated_cost": 0, "duration": "2-3 hours", "best_time": "afternoon", "difficulty": "easy", "address": "5085 Westheimer Rd, Houston, TX 77056", "phone": "+1-713-622-0663", "url": "https://www.simon.com/mall/the-galleria"},
+            {"name": "Nike Store", "category": "shop", "description": "Official Nike retail store featuring the latest athletic footwear, apparel, and equipment. Interactive displays and expert staff to help find the perfect gear.", "estimated_cost": 0, "duration": "1 hour", "best_time": "flexible", "difficulty": "easy", "address": "123 Fashion Avenue, City, State 12345", "phone": "+1-555-567-8901", "url": "https://www.nike.com"},
+            {"name": "Apple Store", "category": "shop", "description": "Flagship Apple retail location showcasing latest iPhones, iPads, Macs, and accessories. Genius Bar for technical support and product demonstrations.", "estimated_cost": 0, "duration": "1 hour", "best_time": "flexible", "difficulty": "easy", "address": "456 Tech Boulevard, City, State 12345", "phone": "+1-555-678-9012", "url": "https://www.apple.com/retail"},
+            {"name": "Target", "category": "shop", "description": "One-stop shop for everyday essentials, clothing, home goods, electronics, and groceries. Known for affordable prices and wide selection.", "estimated_cost": 0, "duration": "1-2 hours", "best_time": "flexible", "difficulty": "easy", "address": "789 Commerce Street, City, State 12345", "phone": "+1-555-789-0123", "url": "https://www.target.com"},
         ],
         "adventure": [
             {"name": "Zip Lining Course", "category": "adventure", "description": "Exhilarating zip line experience through forest canopy.", "estimated_cost": 80, "duration": "2 hours", "best_time": "morning", "difficulty": "moderate"},
@@ -233,41 +268,127 @@ def scrape_activities(
     Scrape activities for a given location and preferences
     Returns structured activity list with budget analysis
     Generates 4-5 activities per interest category
-    Falls back to mock data if API fails
+    Uses AI to research real venues in the location
     """
-    try:
-        interests_str = ", ".join(interest_activities)
-        num_interests = len(interest_activities)
-        
-        prompt = f"""
+    interests_str = ", ".join(interest_activities)
+    num_interests = len(interest_activities)
+    
+    prompt = f"""
 Location: {location}
 Timeframe: {timeframe}
 Total Budget: ${budget}
 User Interests: {interests_str} ({num_interests} categories)
 
-Generate 4-5 activities/events/venues for EACH of these {num_interests} interest categories in {location}.
+RESEARCH and find 4-5 SPECIFIC, REAL venues for EACH of these {num_interests} interest categories in {location}.
 This should total approximately {num_interests * 4}-{num_interests * 5} activities (about 4-5 per category).
-Mix price ranges within each category and ensure variety and quality in recommendations.
+
+CRITICAL REQUIREMENTS:
+- RESEARCH the location {location} and find REAL venues that actually exist there
+- Return SPECIFIC venues: actual restaurant names, mall names, store names, landmark names - NOT generic activity types
+- For "eat" or "dining": Research and return specific restaurants in {location} like popular chains, local favorites, etc.
+- For "shop": Research and return specific malls, shopping centers, or stores in {location}
+- For "sightsee": Research and return specific landmarks, attractions, parks, museums in {location}
+- For "adventure": Research and return specific adventure venues, parks, activities in {location}
+- ALL addresses MUST be real, verifiable street addresses in {location}
+- Descriptions should be 2-3 sentences about what makes each specific place unique and worth visiting
+- Mix price ranges within each category and ensure variety and quality in recommendations
+- Use your knowledge to find well-known, popular venues that are actually in {location}
 """
+    
+    # Retry logic for API calls
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            response = client.chat.completions.create(
+                model="asi1-mini",
+                messages=[
+                    {"role": "system", "content": ACTIVITY_SCRAPER_PROMPT},
+                    {"role": "user", "content": prompt},
+                ],
+                max_tokens=3000,  # Increased for more detailed responses
+                timeout=60  # Increased timeout for research
+            )
+            
+            response_text = response.choices[0].message.content.strip()
+            
+            # Try to extract JSON from response (handle cases where AI adds extra text)
+            # Look for JSON object in the response
+            json_match = re.search(r'\{.*\}', response_text, re.DOTALL)
+            if json_match:
+                response_text = json_match.group(0)
+            
+            scraped_data = json.loads(response_text)
+            
+            # Validate that we got activities
+            if not scraped_data.get("activities") or len(scraped_data.get("activities", [])) == 0:
+                print(f"Warning: No activities returned from AI, retrying... (attempt {attempt + 1}/{max_retries})")
+                if attempt < max_retries - 1:
+                    continue
+                else:
+                    # Last attempt failed, return minimal structure
+                    return {
+                        "activities": [],
+                        "total_budget_analysis": {
+                            "total_available": budget,
+                            "total_estimated": 0,
+                            "remaining_budget": budget,
+                            "budget_per_day": budget
+                        },
+                        "recommendations": ["Unable to find activities. Please try again or provide more specific interests."]
+                    }
+            
+            return scraped_data
+            
+        except json.JSONDecodeError as e:
+            print(f"JSON decode error (attempt {attempt + 1}/{max_retries}): {e}")
+            print(f"Response text: {response_text[:500]}...")
+            if attempt < max_retries - 1:
+                # Add instruction to return only JSON
+                prompt += "\n\nIMPORTANT: Return ONLY valid JSON, no additional text or explanations."
+                continue
+            else:
+                # Last attempt failed
+                print(f"Failed to parse JSON after {max_retries} attempts")
+                return {
+                    "activities": [],
+                    "total_budget_analysis": {
+                        "total_available": budget,
+                        "total_estimated": 0,
+                        "remaining_budget": budget,
+                        "budget_per_day": budget
+                    },
+                    "recommendations": ["Error parsing activity data. Please try again."]
+                }
         
-        response = client.chat.completions.create(
-            model="asi1-mini",
-            messages=[
-                {"role": "system", "content": ACTIVITY_SCRAPER_PROMPT},
-                {"role": "user", "content": prompt},
-            ],
-            max_tokens=2000,
-            timeout=30
-        )
-        
-        scraped_data = json.loads(response.choices[0].message.content)
-        return scraped_data
-        
-    except Exception as e:
-        print(f"Activity scraping error: {e}")
-        print(f"Using fallback mock data for {location}")
-        # Return mock data as fallback
-        return generate_mock_activities(location, timeframe, budget, interest_activities)
+        except Exception as e:
+            print(f"Activity scraping error (attempt {attempt + 1}/{max_retries}): {e}")
+            if attempt < max_retries - 1:
+                continue
+            else:
+                # Last attempt failed - return error structure instead of mock data
+                print(f"Failed to scrape activities after {max_retries} attempts")
+                return {
+                    "activities": [],
+                    "total_budget_analysis": {
+                        "total_available": budget,
+                        "total_estimated": 0,
+                        "remaining_budget": budget,
+                        "budget_per_day": budget
+                    },
+                    "recommendations": [f"Unable to research activities for {location}. Please try again or check the location name."]
+                }
+    
+    # Should not reach here, but just in case
+    return {
+        "activities": [],
+        "total_budget_analysis": {
+            "total_available": budget,
+            "total_estimated": 0,
+            "remaining_budget": budget,
+            "budget_per_day": budget
+        },
+        "recommendations": ["Unable to retrieve activities. Please try again."]
+    }
 
 def analyze_budget_feasibility(
     budget: float,
@@ -434,11 +555,8 @@ async def handle_scraper_request(ctx: Context, sender: str, msg: ChatMessage):
     """
     ctx.logger.info(f"Scraper received message from {sender}")
     
-    # Send acknowledgement
-    await ctx.send(
-        sender,
-        ChatAcknowledgement(timestamp=datetime.utcnow(), acknowledged_msg_id=msg.msg_id),
-    )
+    # NOTE: Not sending ChatAcknowledgement to avoid interfering with ctx.send_and_receive
+    # The orchestrator uses send_and_receive which can match acknowledgements instead of actual responses
     
     try:
         for item in msg.content:
@@ -513,11 +631,12 @@ async def handle_scraper_request(ctx: Context, sender: str, msg: ChatMessage):
                     budget_analysis
                 )
                 
-                # Convert to JSON-serializable format - exclude description, difficulty, duration, best_time
+                # Convert to JSON-serializable format - include description as requested
                 response_json = {
                     "activities": [
                         {
                             "name": a.name,
+                            "description": a.description,
                             "address": a.address,
                             "phone": a.phone,
                             "url": a.url,
