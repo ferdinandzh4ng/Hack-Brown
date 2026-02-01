@@ -1,6 +1,7 @@
 'use client';
 
 import React, { useState, useMemo, useCallback, useRef, useEffect } from 'react';
+import { useRouter } from 'next/navigation';
 import { motion, AnimatePresence } from 'framer-motion';
 import MapGL from 'react-map-gl/mapbox';
 import { Marker, Source, Layer } from 'react-map-gl/mapbox';
@@ -220,6 +221,8 @@ const ItineraryCard = React.memo(function ItineraryCard_({
 });
 
 export default function VICAppleMapsDemo() {
+  const router = useRouter();
+  const [authChecked, setAuthChecked] = useState(false);
   const [viewState, setViewState] = useState<ViewState>('IDLE');
   const [chatInput, setChatInput] = useState('');
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
@@ -228,6 +231,16 @@ export default function VICAppleMapsDemo() {
   const [activeItineraryIndex, setActiveItineraryIndex] = useState(0);
   const mapRef = useRef<MapRef | null>(null);
 
+  // Redirect to login if no session – login page is the first thing users see
+  useEffect(() => {
+    const token = typeof localStorage !== 'undefined' ? localStorage.getItem('session_token') : null;
+    if (!token) {
+      router.replace('/login');
+      return;
+    }
+    setAuthChecked(true);
+  }, [router]);
+  
   // Form state
   const [location, setLocation] = useState('');
   const [startTime, setStartTime] = useState('');
@@ -564,6 +577,18 @@ export default function VICAppleMapsDemo() {
   const drawerBorder = isDarkMode ? 'border-slate-700' : 'border-slate-100';
   const inputBg = isDarkMode ? 'bg-slate-800' : 'bg-slate-100';
   const cardBg = isDarkMode ? 'bg-slate-800 border-slate-700' : 'bg-white border-slate-100';
+
+  // Show login-style loading until we know auth (avoids flashing map then redirect)
+  if (!authChecked) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-slate-bg">
+        <div className="flex flex-col items-center gap-4">
+          <div className="w-10 h-10 rounded-full border-2 border-visa-blue border-t-transparent animate-spin" />
+          <p className="text-sm text-slate-muted font-sans">Loading…</p>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div
