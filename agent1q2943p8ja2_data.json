@@ -16,9 +16,12 @@
     "original_message_2071101f-0386-4671-a77a-530c090f350d": "Plan me a day in Toronto",
     "b59698e6-ee6d-40a8-be1d-6493aff3d01d": "agent1qfsuxw6yaz223jppu974lf2kyuznqeruvy3rnu0pw3m6acmtmxmq7c5yz7k",
     "original_message_b59698e6-ee6d-40a8-be1d-6493aff3d01d": "Eat, sightsee and shop",
-    "conversation_state_agent1qfsuxw6yaz223jppu974lf2kyuznqeruvy3rnu0pw3m6acmtmxmq7c5yz7k": {
+    "conversation_state_agent1qfsuxw6yaz223jppu974lf2kyuznqeruvy3rnu0pw3m6acmtmxmq7c5yz7k": null,
+    "a3a54cd7-2faf-470c-b822-cc7ad1b4457e": "agent1qwtxjkmuvs7qrtwx8jj3mtd8af5th5ayfmdyws9mzxcfwa666n3vkkdanz6",
+    "original_message_a3a54cd7-2faf-470c-b822-cc7ad1b4457e": "@intentdispatch Plan me a night out in toronto\n\n",
+    "conversation_state_agent1qwtxjkmuvs7qrtwx8jj3mtd8af5th5ayfmdyws9mzxcfwa666n3vkkdanz6": {
         "waiting_for_clarification": true,
-        "original_request": "Plan a day itinerary in Toronto",
+        "original_request": "Plan a night out in Toronto",
         "location": "Toronto",
         "budget": "None",
         "start_time": "null",
@@ -79,5 +82,7 @@
                 ]
             }
         ]
-    }
+    },
+    "a5e88585-8625-40b2-b381-25abf7eb9f4c": "agent1qfsuxw6yaz223jppu974lf2kyuznqeruvy3rnu0pw3m6acmtmxmq7c5yz7k",
+    "original_message_a5e88585-8625-40b2-b381-25abf7eb9f4c": "plan me a night out in toronto where i can eat sightsee and shop from 5pm to 10pm"
 }

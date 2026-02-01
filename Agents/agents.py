@@ -57,18 +57,57 @@ def create_text_chat(text: str, end_session: bool = False) -> ChatMessage:
         content=content,
     )
 
+async def safe_send(ctx: Context, destination: str, message: ChatMessage, max_retries: int = 2) -> bool:
+    """
+    Safely send a message to a destination agent with retry logic.
+    Returns True if successful, False otherwise.
+    """
+    import asyncio
+    
+    for attempt in range(max_retries + 1):
+        try:
+            await ctx.send(destination, message)
+            ctx.logger.info(f"Successfully sent message to {destination}")
+            return True
+        except Exception as e:
+            error_msg = str(e).lower()
+            # Check if it's an endpoint resolution error
+            if "unable to resolve" in error_msg or "endpoint" in error_msg:
+                ctx.logger.warning(
+                    f"Attempt {attempt + 1}/{max_retries + 1}: Unable to resolve endpoint for agent {destination}. "
+                    f"This usually means the agent is not registered, has no mailbox, or is offline. Error: {e}"
+                )
+                if attempt < max_retries:
+                    # Wait before retrying (exponential backoff)
+                    await asyncio.sleep(2 ** attempt)
+                    continue
+                else:
+                    ctx.logger.error(
+                        f"Failed to send message to {destination} after {max_retries + 1} attempts. "
+                        f"Agent may not be registered or may be offline. Please ensure the agent has: "
+                        f"1. mailbox=True configured, 2. publish_agent_details=True, 3. is registered on Agentverse"
+                    )
+                    return False
+            else:
+                # Different error, log and return
+                ctx.logger.error(f"Error sending message to {destination}: {e}")
+                return False
+    
+    return False
+
 @chat_proto.on_message(ChatMessage)
 async def handle_message(ctx: Context, sender: str, msg: ChatMessage):
     ctx.logger.info(f"Got a message from {sender}: {msg.content}")
     ctx.storage.set(str(ctx.session), sender)
     
+    # Send acknowledgement (non-blocking, don't fail if it doesn't work)
     try:
         await ctx.send(
             sender,
             ChatAcknowledgement(timestamp=datetime.now(timezone.utc), acknowledged_msg_id=msg.msg_id),
         )
     except Exception as e:
-        ctx.logger.error(f"Error sending acknowledgement to {sender}: {e}")
+        ctx.logger.warning(f"Error sending acknowledgement to {sender}: {e}")
         # Don't fail the entire message handling if acknowledgement fails
     
     for item in msg.content:
@@ -95,13 +134,8 @@ async def handle_message(ctx: Context, sender: str, msg: ChatMessage):
             except Exception as e:
                 ctx.logger.error(f"Error sending structured output request to AI agent: {e}")
                 # Send error message back to user
-                try:
-                    await ctx.send(
-                        sender,
-                        create_text_chat("Sorry, I encountered an error processing your request. Please try again.")
-                    )
-                except Exception as send_err:
-                    ctx.logger.error(f"Error sending error message to {sender}: {send_err}")
+                error_msg = create_text_chat("Sorry, I encountered an error processing your request. Please try again.")
+                await safe_send(ctx, sender, error_msg)
         else:
             ctx.logger.info(f"Got unexpected content from {sender}")
 
@@ -124,15 +158,10 @@ async def handle_structured_output_response(
         return
     
     if "<UNKNOWN>" in str(msg.output):
-        try:
-            await ctx.send(
-                session_sender,
-                create_text_chat(
-                    "Sorry, I couldn't process your request. Please try again later."
-                ),
-            )
-        except Exception as e:
-            ctx.logger.error(f"Unable to resolve destination endpoint for agent: {session_sender}. Error: {e}")
+        error_msg = create_text_chat(
+            "Sorry, I couldn't process your request. Please try again later."
+        )
+        await safe_send(ctx, session_sender, error_msg)
         return
     
     # Extract intent parameters from structured output
@@ -177,41 +206,27 @@ async def handle_structured_output_response(
         
         if result["type"] == "error":
             error_msg = json.dumps(result["data"], indent=2)
-            try:
-                await ctx.send(session_sender, create_text_chat(error_msg))
-            except Exception as e:
-                ctx.logger.error(f"Unable to resolve destination endpoint for agent: {session_sender}. Error: {e}")
+            await safe_send(ctx, session_sender, create_text_chat(error_msg))
         elif result["type"] == "clarification_needed":
             # Store conversation state for next message
             ctx.storage.set(conversation_state_key, result["data"]["conversation_state"])
-            try:
-                await ctx.send(session_sender, create_text_chat(result["data"]["prompt"], end_session=False))
-            except Exception as e:
-                ctx.logger.error(f"Unable to resolve destination endpoint for agent: {session_sender}. Error: {e}")
+            await safe_send(ctx, session_sender, create_text_chat(result["data"]["prompt"], end_session=False))
         elif result["type"] == "dispatch_plan":
-            # Clear conversation state if it exists
+            # Clear conversation state if it exists (set to None to clear it)
             if conversation_state:
-                ctx.storage.delete(conversation_state_key)
+                ctx.storage.set(conversation_state_key, None)
             
             dispatch_plan_json = json.dumps(result["data"], indent=2)
-            try:
-                await ctx.send(session_sender, create_text_chat(dispatch_plan_json, end_session=True))
-            except Exception as e:
-                ctx.logger.error(f"Unable to resolve destination endpoint for agent: {session_sender}. Error: {e}")
+            await safe_send(ctx, session_sender, create_text_chat(dispatch_plan_json, end_session=True))
             
     except Exception as err:
         ctx.logger.error(f"Error processing structured output: {err}")
         import traceback
         ctx.logger.error(traceback.format_exc())
-        try:
-            await ctx.send(
-                session_sender,
-                create_text_chat(
-                    "Sorry, I couldn't process your request. Please try again later."
-                ),
-            )
-        except Exception as e:
-            ctx.logger.error(f"Unable to resolve destination endpoint for agent: {session_sender}. Error: {e}")
+        error_msg = create_text_chat(
+            "Sorry, I couldn't process your request. Please try again later."
+        )
+        await safe_send(ctx, session_sender, error_msg)
 
 agent.include(chat_proto, publish_manifest=True)
 agent.include(struct_output_client_proto, publish_manifest=True)
