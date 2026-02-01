@@ -153,108 +153,6 @@ Return JSON analysis:
 """
 
 # ============================================================
-# Fallback Mock Data
-# ============================================================
-
-def generate_mock_activities(
-    location: str,
-    timeframe: str,
-    budget: float,
-    interest_activities: List[str]
-) -> Dict:
-    """
-    Generate realistic mock activity data as fallback when API fails
-    """
-    mock_activities = {
-        "skiing": [
-            {"name": "Mountain Peak Ski Resort", "category": "skiing", "description": "Full-service ski resort with varied terrain for all levels.", "estimated_cost": 75, "duration": "full day", "best_time": "morning", "difficulty": "moderate"},
-            {"name": "Beginner Ski Lessons", "category": "skiing", "description": "Professional instruction for first-time skiers in a safe environment.", "estimated_cost": 95, "duration": "3 hours", "best_time": "morning", "difficulty": "easy"},
-            {"name": "Night Skiing Experience", "category": "skiing", "description": "Skiing under lights on groomed runs with a festive atmosphere.", "estimated_cost": 60, "duration": "4 hours", "best_time": "evening", "difficulty": "moderate"},
-            {"name": "Backcountry Ski Tour", "category": "skiing", "description": "Off-piste skiing adventure with experienced guides in remote terrain.", "estimated_cost": 150, "duration": "full day", "best_time": "morning", "difficulty": "challenging"},
-            {"name": "Ski Equipment Rental", "category": "skiing", "description": "Premium ski and snowboard rental packages for all skill levels.", "estimated_cost": 45, "duration": "flexible", "best_time": "flexible", "difficulty": "easy"},
-        ],
-        "hiking": [
-            {"name": "Mountain Trail Loop", "category": "hiking", "description": "Scenic 8-mile loop with breathtaking views and moderate elevation gain.", "estimated_cost": 0, "duration": "4 hours", "best_time": "morning", "difficulty": "moderate"},
-            {"name": "Waterfall Hike Adventure", "category": "hiking", "description": "Trek to cascading waterfalls through diverse forest ecosystems.", "estimated_cost": 25, "duration": "5 hours", "best_time": "morning", "difficulty": "moderate"},
-            {"name": "Summit Challenge Hike", "category": "hiking", "description": "Demanding ascent to high altitude peaks with panoramic views.", "estimated_cost": 0, "duration": "6 hours", "best_time": "early morning", "difficulty": "challenging"},
-            {"name": "Guided Nature Walk", "category": "hiking", "description": "Educational walk with naturalist guide learning about local flora and fauna.", "estimated_cost": 35, "duration": "2 hours", "best_time": "afternoon", "difficulty": "easy"},
-            {"name": "Rock Climbing Trail", "category": "hiking", "description": "Hiking combined with scrambling and light climbing sections.", "estimated_cost": 40, "duration": "5 hours", "best_time": "morning", "difficulty": "challenging"},
-        ],
-        "sightseeing": [
-            {"name": "Empire State Building", "category": "sightseeing", "description": "Iconic 102-story Art Deco skyscraper offering panoramic views of New York City from the 86th and 102nd floor observatories. Historic landmark and architectural marvel.", "estimated_cost": 38, "duration": "2 hours", "best_time": "afternoon", "difficulty": "easy", "address": "350 5th Ave, New York, NY 10118", "phone": "+1-212-736-3100", "url": "https://www.esbnyc.com"},
-            {"name": "Golden Gate Bridge", "category": "sightseeing", "description": "Famous suspension bridge spanning San Francisco Bay. Walk or bike across for stunning views of the city, Alcatraz, and the Pacific Ocean.", "estimated_cost": 0, "duration": "1-2 hours", "best_time": "morning", "difficulty": "easy", "address": "Golden Gate Bridge, San Francisco, CA 94129", "phone": "+1-415-921-5858", "url": "https://www.goldengate.org"},
-            {"name": "Times Square", "category": "sightseeing", "description": "Vibrant commercial intersection known for bright billboards, Broadway theaters, and bustling energy. The heart of Manhattan's entertainment district.", "estimated_cost": 0, "duration": "1 hour", "best_time": "evening", "difficulty": "easy", "address": "Times Square, New York, NY 10036", "phone": "+1-212-768-1560", "url": "https://www.timessquarenyc.org"},
-            {"name": "Central Park", "category": "sightseeing", "description": "843-acre urban park in Manhattan featuring lakes, walking paths, gardens, and recreational facilities. Iconic green space in the heart of the city.", "estimated_cost": 0, "duration": "2-3 hours", "best_time": "morning", "difficulty": "easy", "address": "Central Park, New York, NY 10024", "phone": "+1-212-310-6600", "url": "https://www.centralparknyc.org"},
-            {"name": "Statue of Liberty", "category": "sightseeing", "description": "Symbolic monument and UNESCO World Heritage Site. Take a ferry to Liberty Island for close-up views and visit the museum inside the pedestal.", "estimated_cost": 24, "duration": "3 hours", "best_time": "morning", "difficulty": "easy", "address": "Liberty Island, New York, NY 10004", "phone": "+1-212-363-3200", "url": "https://www.nps.gov/stli"},
-        ],
-        "dining": [
-            {"name": "The Cheesecake Factory", "category": "dining", "description": "Popular American chain restaurant known for extensive menu and signature cheesecakes. Casual dining atmosphere with something for everyone.", "estimated_cost": 35, "duration": "1.5 hours", "best_time": "evening", "difficulty": "easy", "address": "10250 Santa Monica Blvd, Los Angeles, CA 90067", "phone": "+1-310-203-1000", "url": "https://www.thecheesecakefactory.com"},
-            {"name": "Olive Garden", "category": "dining", "description": "Italian-American restaurant chain offering unlimited breadsticks, pasta dishes, and Italian classics in a family-friendly setting.", "estimated_cost": 25, "duration": "1.5 hours", "best_time": "evening", "difficulty": "easy", "address": "1234 Main St, City, State 12345", "phone": "+1-555-123-4567", "url": "https://www.olivegarden.com"},
-            {"name": "Local Burger Joint", "category": "dining", "description": "Neighborhood burger spot serving handcrafted burgers, fresh-cut fries, and milkshakes. Known for locally-sourced beef and creative toppings.", "estimated_cost": 18, "duration": "1 hour", "best_time": "flexible", "difficulty": "easy", "address": "456 Oak Avenue, City, State 12345", "phone": "+1-555-234-5678", "url": "https://www.localburger.com"},
-            {"name": "Sushi House", "category": "dining", "description": "Authentic Japanese restaurant featuring fresh sushi, sashimi, and traditional dishes. Cozy atmosphere with skilled chefs preparing dishes at the bar.", "estimated_cost": 45, "duration": "2 hours", "best_time": "evening", "difficulty": "easy", "address": "789 Elm Street, City, State 12345", "phone": "+1-555-345-6789", "url": "https://www.sushihouse.com"},
-            {"name": "Farm-to-Table Bistro", "category": "dining", "description": "Upscale restaurant focusing on seasonal, locally-sourced ingredients. Creative menu changes with the seasons, featuring regional specialties.", "estimated_cost": 65, "duration": "2.5 hours", "best_time": "evening", "difficulty": "easy", "address": "321 Maple Drive, City, State 12345", "phone": "+1-555-456-7890", "url": "https://www.farmtotablebistro.com"},
-        ],
-        "eat": [
-            {"name": "The Cheesecake Factory", "category": "eat", "description": "Popular American chain restaurant known for extensive menu and signature cheesecakes. Casual dining atmosphere with something for everyone.", "estimated_cost": 35, "duration": "1.5 hours", "best_time": "evening", "difficulty": "easy", "address": "10250 Santa Monica Blvd, Los Angeles, CA 90067", "phone": "+1-310-203-1000", "url": "https://www.thecheesecakefactory.com"},
-            {"name": "Olive Garden", "category": "eat", "description": "Italian-American restaurant chain offering unlimited breadsticks, pasta dishes, and Italian classics in a family-friendly setting.", "estimated_cost": 25, "duration": "1.5 hours", "best_time": "evening", "difficulty": "easy", "address": "1234 Main St, City, State 12345", "phone": "+1-555-123-4567", "url": "https://www.olivegarden.com"},
-            {"name": "Local Burger Joint", "category": "eat", "description": "Neighborhood burger spot serving handcrafted burgers, fresh-cut fries, and milkshakes. Known for locally-sourced beef and creative toppings.", "estimated_cost": 18, "duration": "1 hour", "best_time": "flexible", "difficulty": "easy", "address": "456 Oak Avenue, City, State 12345", "phone": "+1-555-234-5678", "url": "https://www.localburger.com"},
-            {"name": "Sushi House", "category": "eat", "description": "Authentic Japanese restaurant featuring fresh sushi, sashimi, and traditional dishes. Cozy atmosphere with skilled chefs preparing dishes at the bar.", "estimated_cost": 45, "duration": "2 hours", "best_time": "evening", "difficulty": "easy", "address": "789 Elm Street, City, State 12345", "phone": "+1-555-345-6789", "url": "https://www.sushihouse.com"},
-            {"name": "Farm-to-Table Bistro", "category": "eat", "description": "Upscale restaurant focusing on seasonal, locally-sourced ingredients. Creative menu changes with the seasons, featuring regional specialties.", "estimated_cost": 65, "duration": "2.5 hours", "best_time": "evening", "difficulty": "easy", "address": "321 Maple Drive, City, State 12345", "phone": "+1-555-456-7890", "url": "https://www.farmtotablebistro.com"},
-        ],
-        "shop": [
-            {"name": "Westfield Century City", "category": "shop", "description": "Upscale shopping mall featuring over 200 stores including luxury brands, department stores, and dining options. Modern architecture with outdoor spaces.", "estimated_cost": 0, "duration": "3 hours", "best_time": "afternoon", "difficulty": "easy", "address": "10250 Santa Monica Blvd, Los Angeles, CA 90067", "phone": "+1-310-277-3898", "url": "https://www.westfield.com/centurycity"},
-            {"name": "The Galleria", "category": "shop", "description": "Large shopping center with major department stores, specialty shops, and food court. Popular destination for fashion, electronics, and home goods.", "estimated_cost": 0, "duration": "2-3 hours", "best_time": "afternoon", "difficulty": "easy", "address": "5085 Westheimer Rd, Houston, TX 77056", "phone": "+1-713-622-0663", "url": "https://www.simon.com/mall/the-galleria"},
-            {"name": "Nike Store", "category": "shop", "description": "Official Nike retail store featuring the latest athletic footwear, apparel, and equipment. Interactive displays and expert staff to help find the perfect gear.", "estimated_cost": 0, "duration": "1 hour", "best_time": "flexible", "difficulty": "easy", "address": "123 Fashion Avenue, City, State 12345", "phone": "+1-555-567-8901", "url": "https://www.nike.com"},
-            {"name": "Apple Store", "category": "shop", "description": "Flagship Apple retail location showcasing latest iPhones, iPads, Macs, and accessories. Genius Bar for technical support and product demonstrations.", "estimated_cost": 0, "duration": "1 hour", "best_time": "flexible", "difficulty": "easy", "address": "456 Tech Boulevard, City, State 12345", "phone": "+1-555-678-9012", "url": "https://www.apple.com/retail"},
-            {"name": "Target", "category": "shop", "description": "One-stop shop for everyday essentials, clothing, home goods, electronics, and groceries. Known for affordable prices and wide selection.", "estimated_cost": 0, "duration": "1-2 hours", "best_time": "flexible", "difficulty": "easy", "address": "789 Commerce Street, City, State 12345", "phone": "+1-555-789-0123", "url": "https://www.target.com"},
-        ],
-        "adventure": [
-            {"name": "Zip Lining Course", "category": "adventure", "description": "Exhilarating zip line experience through forest canopy.", "estimated_cost": 80, "duration": "2 hours", "best_time": "morning", "difficulty": "moderate"},
-            {"name": "Whitewater Rafting", "category": "adventure", "description": "Thrilling river rafting adventure with experienced guides.", "estimated_cost": 70, "duration": "4 hours", "best_time": "morning", "difficulty": "moderate"},
-            {"name": "Paragliding Experience", "category": "adventure", "description": "Tandem paragliding with certified instructors over scenic terrain.", "estimated_cost": 120, "duration": "2 hours", "best_time": "early morning", "difficulty": "moderate"},
-            {"name": "Rock Climbing Gym", "category": "adventure", "description": "Indoor climbing facility with routes for all skill levels.", "estimated_cost": 20, "duration": "2 hours", "best_time": "flexible", "difficulty": "moderate"},
-            {"name": "Canyoneering Adventure", "category": "adventure", "description": "Explore narrow canyons via hiking, scrambling, and rappelling.", "estimated_cost": 95, "duration": "full day", "best_time": "morning", "difficulty": "challenging"},
-        ],
-    }
-    
-    # Build activities list based on user interests
-    activities = []
-    for interest in interest_activities:
-        interest_lower = interest.lower()
-        if interest_lower in mock_activities:
-            activities.extend(mock_activities[interest_lower])
-        else:
-            # Generic fallback for unknown interests
-            activities.append({
-                "name": f"Popular {interest.title()} Activity",
-                "category": interest_lower,
-                "description": f"Experience authentic {interest.lower()} activities in {location}.",
-                "estimated_cost": 50,
-                "duration": "3 hours",
-                "best_time": "afternoon",
-                "difficulty": "moderate"
-            })
-    
-    # Calculate budget analysis
-    total_estimated = sum(a.get("estimated_cost", 0) for a in activities)
-    remaining = budget - total_estimated
-    
-    return {
-        "activities": activities,
-        "total_budget_analysis": {
-            "total_available": budget,
-            "total_estimated": total_estimated,
-            "remaining_budget": max(0, remaining),
-            "budget_per_day": budget / (int(timeframe.split()[0]) if timeframe.split()[0].isdigit() else 1)
-        },
-        "recommendations": [
-            f"Combine {activities[0]['name']} with {activities[1]['name']} for a full day",
-            f"Book {activities[2]['name']} in advance for better rates",
-            f"Save budget for meals at local restaurants"
-        ]
-    }
-
-# ============================================================
 # Events Scraper Functions
 # ============================================================
 
@@ -605,7 +503,7 @@ async def handle_scraper_request(ctx: Context, sender: str, msg: ChatMessage):
                 
                 ctx.logger.info(f"Valid request for {prefs.location} with interests: {prefs.interest_activities}")
                 
-                # Scrape activities (with fallback to mock data)
+                # Scrape activities using AI
                 scraped_data = scrape_activities(
                     prefs.location,
                     prefs.timeframe,

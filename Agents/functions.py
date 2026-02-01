@@ -98,16 +98,20 @@ Analyze the following user request and determine if it's too vague to create a s
 
 A request is considered vague if:
 - It only mentions a location without specific activities (e.g., "Plan me a day in New York", "I want to visit Paris")
-- It lacks clear preferences or interests
+- It lacks clear preferences or interests AND doesn't specify activity types
 - It's too general and doesn't specify what types of activities the user wants
 - It asks for a "day plan" or "itinerary" without specifying activities
 
 A request is NOT vague if:
 - It mentions specific activities (e.g., "I want to visit the Eiffel Tower and eat at a French restaurant")
 - It includes clear preferences (e.g., "I like museums and art galleries")
-- It specifies activity types (e.g., "I want to go shopping and sightseeing")
+- It specifies activity types (e.g., "I want to go shopping and sightseeing", "eat and sightsee", "dining and sightseeing")
+- It mentions activity categories like "eat", "dining", "sightsee", "sightseeing", "shop", "shopping", etc. along with a budget
 
-IMPORTANT: If the request only mentions a location and asks for a plan/itinerary without specific activities, it IS vague.
+IMPORTANT: 
+- If the request specifies activity types (like "eat", "sightsee", "shop", "dining", "sightseeing") AND mentions a budget, it is NOT vague, even if location is not explicitly mentioned in the text.
+- If the request only mentions a location and asks for a plan/itinerary without specific activities, it IS vague.
+- Location is helpful but NOT required if activities and budget are specified.
 
 Return ONLY valid JSON:
 {
@@ -846,11 +850,21 @@ def dispatch_intent(user_request: str, sender: str, conversation_state: Optional
         if not isinstance(user_request, str):
             user_request = str(user_request)
         
+        # Check if request mentions specific activity types (not vague if activities are specified)
+        activity_keywords = ["eat", "dining", "sightsee", "sightseeing", "shop", "shopping", "entertainment", 
+                            "museum", "gallery", "park", "adventure", "outdoor", "cultural", "relax", "spa"]
+        has_activities = any(keyword in user_request.lower() for keyword in activity_keywords)
+        
+        # If activities are specified, override the vagueness check - request is NOT vague
+        if has_activities:
+            is_vague = False
+            print(f"Request has activities specified, overriding vagueness check - not vague")
+        
         # Also check if this looks like a general planning request (contains words like "plan", "itinerary", "day in")
         is_planning_request = any(word in user_request.lower() for word in ["plan", "itinerary", "day in", "visit", "trip to"])
         
-        # Treat as vague if: explicitly marked vague OR (has location AND looks like general planning request)
-        if is_vague or (location and is_planning_request):
+        # Treat as vague if: explicitly marked vague OR (has location AND looks like general planning request AND no activities)
+        if is_vague or (location and is_planning_request and not has_activities):
             # REQUEST IS VAGUE - Need to gather more information
             # If location wasn't extracted, try to extract it from text
             if not location:

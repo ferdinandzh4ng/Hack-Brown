@@ -267,24 +267,46 @@ async def handle_message(ctx: Context, sender: str, msg: ChatMessage):
             ctx.storage.set(str(ctx.session), sender)
             ctx.storage.set(f"last_sender_{ctx.session}", sender)
             
+            # Try to parse as JSON with start_time, end_time, location, user_request
+            message_text = item.text
+            try:
+                parsed = json.loads(item.text)
+                if isinstance(parsed, dict) and "user_request" in parsed and "location" in parsed:
+                    # It's the new JSON format
+                    message_text = parsed.get("user_request", "")
+                    location_from_json = parsed.get("location", "")
+                    start_time_from_json = parsed.get("start_time")
+                    end_time_from_json = parsed.get("end_time")
+                    
+                    # Store JSON values for later use
+                    ctx.storage.set(f"json_location_{ctx.session}", location_from_json)
+                    ctx.storage.set(f"json_start_time_{ctx.session}", start_time_from_json)
+                    ctx.storage.set(f"json_end_time_{ctx.session}", end_time_from_json)
+                    
+                    ctx.logger.info(f"Parsed JSON input: location={location_from_json}, start_time={start_time_from_json}, end_time={end_time_from_json}")
+                    ctx.logger.info(f"Using user_request for intent extraction: {message_text}")
+            except (json.JSONDecodeError, ValueError):
+                # Not JSON format, use text as-is
+                pass
+            
             # Store the original message text for fallback if structured output fails
             original_message_key = f"original_message_{ctx.session}"
-            ctx.storage.set(original_message_key, item.text)
+            ctx.storage.set(original_message_key, message_text)
             
-            # Extract time information from user's text
-            extracted_start_time, extracted_end_time = extract_times_from_text(item.text)
+            # Extract time information from user's text (as fallback if not in JSON)
+            extracted_start_time, extracted_end_time = extract_times_from_text(message_text)
             if extracted_start_time or extracted_end_time:
                 ctx.logger.info(f"Extracted times from text: start_time={extracted_start_time}, end_time={extracted_end_time}")
                 # Store extracted times for use in structured output response handler
                 ctx.storage.set(f"extracted_start_time_{ctx.session}", extracted_start_time)
                 ctx.storage.set(f"extracted_end_time_{ctx.session}", extracted_end_time)
             
-            # Use structured output to extract intent parameters
+            # Use structured output to extract intent parameters from user_request
             try:
                 await ctx.send(
                     AI_AGENT_ADDRESS,
                     StructuredOutputPrompt(
-                        prompt=item.text, 
+                        prompt=message_text, 
                         output_schema=IntentRequest.schema()
                     ),
                 )
@@ -361,18 +383,33 @@ async def handle_structured_output_response(
                 if not user_request:
                     user_request = str(msg.output)
             
+            # Check for JSON values (from JSON input format)
+            json_location = ctx.storage.get(f"json_location_{ctx.session}")
+            json_start_time = ctx.storage.get(f"json_start_time_{ctx.session}")
+            json_end_time = ctx.storage.get(f"json_end_time_{ctx.session}")
+            
             # Check if we extracted times from the text and use them if structured output didn't provide times
             extracted_start_time = ctx.storage.get(f"extracted_start_time_{ctx.session}")
             extracted_end_time = ctx.storage.get(f"extracted_end_time_{ctx.session}")
             
-            # If times were extracted from text and not in structured output, add them to user_request context
-            if (extracted_start_time or extracted_end_time) and not intent_data.get("start_time") and not intent_data.get("end_time"):
-                ctx.logger.info(f'Using extracted times: start_time={extracted_start_time}, end_time={extracted_end_time}')
+            # Prefer JSON values over extracted times
+            start_time_to_use = json_start_time or extracted_start_time
+            end_time_to_use = json_end_time or extracted_end_time
+            
+            # Always use location from JSON input if available (prioritize JSON location)
+            if json_location:
+                # Always add location from JSON to user_request
+                user_request = f"{user_request} (Location: {json_location})"
+                ctx.logger.info(f'Using location from JSON input: {json_location}')
+            
+            # If times were available and not in structured output, add them to user_request
+            if (start_time_to_use or end_time_to_use) and not intent_data.get("start_time") and not intent_data.get("end_time"):
+                ctx.logger.info(f'Using times: start_time={start_time_to_use}, end_time={end_time_to_use}')
                 # Append time information to user_request so dispatch_intent can use it
-                if extracted_start_time and extracted_end_time:
-                    user_request = f"{user_request} (Time: {extracted_start_time} to {extracted_end_time})"
-                elif extracted_start_time:
-                    user_request = f"{user_request} (Start time: {extracted_start_time})"
+                if start_time_to_use and end_time_to_use:
+                    user_request = f"{user_request} (Time: {start_time_to_use} to {end_time_to_use})"
+                elif start_time_to_use:
+                    user_request = f"{user_request} (Start time: {start_time_to_use})"
             
             ctx.logger.info(f'Processing intent request: {user_request}')
             
@@ -383,24 +420,42 @@ async def handle_structured_output_response(
             # Process intent dispatch
             result = dispatch_intent(user_request, session_sender, conversation_state)
             
-            # If we have extracted times and the dispatch plan doesn't have them, add them
-            if result.get("type") == "dispatch_plan" and (extracted_start_time or extracted_end_time):
+            # Check if result is None or invalid
+            if result is None:
+                ctx.logger.error("dispatch_intent returned None, sending error response")
+                error_msg = create_text_chat("Sorry, I encountered an error processing your request. Please try again.")
+                await safe_send(ctx, session_sender, error_msg)
+                return
+            
+            if not isinstance(result, dict) or "type" not in result:
+                ctx.logger.error(f"dispatch_intent returned invalid result: {result}")
+                error_msg = create_text_chat("Sorry, I encountered an error processing your request. Please try again.")
+                await safe_send(ctx, session_sender, error_msg)
+                return
+            
+            # Update dispatch plan with JSON values (location, start_time, end_time)
+            if result.get("type") == "dispatch_plan":
                 dispatch_data = result.get("data", {})
                 constraints = dispatch_data.get("constraints", {})
                 
-                # Only add times if they're not already in constraints
-                if not constraints.get("start_time") and extracted_start_time:
-                    constraints["start_time"] = extracted_start_time
-                    ctx.logger.info(f'Added extracted start_time to dispatch plan: {extracted_start_time}')
+                # Always use JSON location if available (prioritize over dispatch plan location)
+                if json_location:
+                    constraints["location"] = json_location
+                    ctx.logger.info(f'Using location from JSON input in dispatch plan: {json_location}')
                 
-                if not constraints.get("end_time") and extracted_end_time:
-                    constraints["end_time"] = extracted_end_time
-                    ctx.logger.info(f'Added extracted end_time to dispatch plan: {extracted_end_time}')
+                # Add times if available and not already in constraints
+                if start_time_to_use and not constraints.get("start_time"):
+                    constraints["start_time"] = start_time_to_use
+                    ctx.logger.info(f'Added start_time to dispatch plan: {start_time_to_use}')
+                
+                if end_time_to_use and not constraints.get("end_time"):
+                    constraints["end_time"] = end_time_to_use
+                    ctx.logger.info(f'Added end_time to dispatch plan: {end_time_to_use}')
                 
                 dispatch_data["constraints"] = constraints
                 result["data"] = dispatch_data
         
-        if result["type"] == "error":
+        if result.get("type") == "error":
             error_msg = json.dumps(result["data"], indent=2)
             await safe_send(ctx, session_sender, create_text_chat(error_msg))
         elif result["type"] == "clarification_needed":

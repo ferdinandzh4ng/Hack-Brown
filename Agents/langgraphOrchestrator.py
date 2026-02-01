@@ -15,6 +15,7 @@ from uuid import uuid4
 import json
 import os
 import asyncio
+import re
 from dotenv import load_dotenv
 from langgraph.graph import StateGraph, END
 
@@ -47,6 +48,8 @@ class OrchestratorState(TypedDict):
     location: str
     budget: float
     timeframe: str
+    start_time: Optional[str]  # ISO 8601 datetime string
+    end_time: Optional[str]  # ISO 8601 datetime string
     fund_allocation_response: Optional[Dict]
     events_scraper_response: Optional[Dict]
     final_output: Optional[Dict]
@@ -90,17 +93,110 @@ EVENTS_SCRAPER_AGENT_ADDRESS = os.getenv(
 # _pending_responses: Dict[str, asyncio.Future] = {}
 
 # ============================================================
+# Helper Functions
+# ============================================================
+
+def remove_agent_ids(text: str) -> str:
+    """
+    Remove agent IDs from text in various formats.
+    
+    Args:
+        text: Input text that may contain agent IDs
+        
+    Returns:
+        str: Cleaned text with agent IDs removed
+    """
+    if not text or not isinstance(text, str):
+        return text
+    
+    cleaned_text = text.strip()
+    
+    # Remove @agent mentions with alphanumeric IDs
+    cleaned_text = re.sub(r'@agent[a-zA-Z0-9]+', '', cleaned_text)
+    
+    # Remove standalone agent addresses (agent1q followed by alphanumeric)
+    cleaned_text = re.sub(r'\bagent1q[a-zA-Z0-9]+\b', '', cleaned_text)
+    
+    # Remove any remaining agent mentions
+    cleaned_text = re.sub(r'\bagent\s*\d+[a-zA-Z0-9]*\b', '', cleaned_text, flags=re.IGNORECASE)
+    
+    # Clean up extra whitespace and newlines
+    cleaned_text = re.sub(r'\s+', ' ', cleaned_text).strip()
+    
+    # Remove leading/trailing punctuation that might be left after agent ID removal
+    cleaned_text = re.sub(r'^[,\s]+|[,\s]+$', '', cleaned_text)
+    
+    return cleaned_text if cleaned_text else text
+
+def parse_text_to_json(text: str) -> Optional[Dict]:
+    """
+    Parse text into JSON format, removing agent IDs and cleaning up the input.
+    Handles both direct JSON input and text with agent mentions.
+    
+    Args:
+        text: Input text that may contain agent IDs, JSON, or plain text
+        
+    Returns:
+        Dict: Parsed JSON data if valid JSON found, None otherwise
+    """
+    if not text or not isinstance(text, str):
+        return None
+    
+    # Remove agent IDs first
+    cleaned_text = remove_agent_ids(text)
+    
+    if not cleaned_text:
+        return None
+    
+    # Try to parse as JSON
+    try:
+        data = json.loads(cleaned_text)
+        if isinstance(data, dict):
+            return data
+    except json.JSONDecodeError:
+        # Not valid JSON, return None to treat as plain text
+        pass
+    
+    return None
+
+# ============================================================
 # LangGraph Workflow Nodes
 # ============================================================
 
-async def call_intent_dispatcher_agent(ctx: Context, user_input: str, sender: str, conversation_state: Optional[Dict]) -> Dict:
+async def call_intent_dispatcher_agent(
+    ctx: Context, 
+    user_input: str, 
+    sender: str, 
+    conversation_state: Optional[Dict],
+    location: Optional[str] = None,
+    start_time: Optional[str] = None,
+    end_time: Optional[str] = None
+) -> Dict:
     """Call intent dispatcher agent via Fetch.ai using send_and_receive"""
     try:
+        # If we have location, start_time, or end_time, send them as JSON to agents.py
+        if location or start_time or end_time:
+            message_data = {
+                "user_request": user_input
+            }
+            if location:
+                message_data["location"] = location
+            if start_time:
+                message_data["start_time"] = start_time
+            if end_time:
+                message_data["end_time"] = end_time
+            
+            message_text = json.dumps(message_data)
+            ctx.logger.info(f"Sending JSON to intent dispatcher with location={location}, start_time={start_time}, end_time={end_time}")
+        else:
+            # No JSON values, send plain text
+            message_text = user_input
+        
         # The intent dispatcher agent expects a ChatMessage with the user input
         message = ChatMessage(
             timestamp=datetime.now(timezone.utc),
             msg_id=uuid4(),
-            content=[TextContent(type="text", text=user_input)],
+            content=[TextContent(type="text", text=message_text)],
         )
         
         ctx.logger.info(f"Sending request to intent dispatcher agent: {INTENT_DISPATCHER_AGENT_ADDRESS}")
@@ -180,9 +276,15 @@ async def dispatch_intent_node(state: OrchestratorState, ctx: Context) -> Orches
         user_input = state["user_input"]
         sender = state["sender"]
         conversation_state = state.get("conversation_state")
+        location = state.get("location")
+        start_time = state.get("start_time")
+        end_time = state.get("end_time")
         
-        # Call intent dispatcher agent via Fetch.ai
-        result = await call_intent_dispatcher_agent(ctx, user_input, sender, conversation_state)
+        # Call intent dispatcher agent via Fetch.ai with location and times
+        result = await call_intent_dispatcher_agent(
+            ctx, user_input, sender, conversation_state, 
+            location=location, start_time=start_time, end_time=end_time
+        )
         
         state["dispatch_result"] = result
         
@@ -199,7 +301,7 @@ async def dispatch_intent_node(state: OrchestratorState, ctx: Context) -> Orches
         return state
 
 def extract_parameters_node(state: OrchestratorState) -> OrchestratorState:
-    """Node 2: Extract parameters from dispatch plan"""
+    """Node 2: Extract parameters from dispatch plan and use JSON inputs"""
     try:
         dispatch_plan = state.get("dispatch_plan")
         
@@ -207,18 +309,22 @@ def extract_parameters_node(state: OrchestratorState) -> OrchestratorState:
             state["error"] = "No dispatch plan available"
             return state
         
-        # Extract activities (these are general categories like "eat", "sightsee", etc.)
+        # Extract activities and budget from dispatch plan (from user_request)
         activities = dispatch_plan.get("activity_list", [])
         constraints = dispatch_plan.get("constraints", {})
         
         state["activities"] = activities
-        state["location"] = constraints.get("location", "")
-        state["budget"] = constraints.get("budget") or 500.0  # Default budget if not provided
-        state["timeframe"] = constraints.get("timeframe") or "weekend"  # Default timeframe
+        # Location, start_time, end_time come from JSON input (already set in handle_user_message)
+        # Only override location if not already set from JSON
+        if not state.get("location"):
+            state["location"] = constraints.get("location", "")
         
-        # Extract timeframe from start_time and end_time if available
-        start_time = constraints.get("start_time")
-        end_time = constraints.get("end_time")
+        # Budget comes from dispatch plan (extracted from user_request)
+        state["budget"] = constraints.get("budget") or 500.0  # Default budget if not provided
+        
+        # Calculate timeframe from start_time and end_time if available
+        start_time = state.get("start_time")
+        end_time = state.get("end_time")
         
         if start_time and end_time:
             # Try to calculate timeframe from dates
@@ -227,14 +333,21 @@ def extract_parameters_node(state: OrchestratorState) -> OrchestratorState:
                 start = dt.fromisoformat(start_time.replace('Z', '+00:00'))
                 end = dt.fromisoformat(end_time.replace('Z', '+00:00'))
                 days = (end - start).days
+                hours = (end - start).total_seconds() / 3600
                 if days == 0:
-                    state["timeframe"] = "1 day"
+                    if hours < 12:
+                        state["timeframe"] = f"{int(hours)} hours"
+                    else:
+                        state["timeframe"] = "1 day"
                 elif days == 1:
                     state["timeframe"] = "weekend"
                 else:
                     state["timeframe"] = f"{days} days"
-            except:
-                pass
+            except Exception as e:
+                # Error calculating timeframe, use default
+                state["timeframe"] = constraints.get("timeframe") or "weekend"
+        else:
+            state["timeframe"] = constraints.get("timeframe") or "weekend"
         
         return state
     except Exception as e:
@@ -557,36 +670,56 @@ async def handle_user_message(ctx: Context, sender: str, msg: ChatMessage):
             await ctx.send(sender, error_msg)
             return
         
-        # Check if the input is already an error response (from a previous failed attempt)
-        try:
-            parsed = json.loads(user_input)
-            if isinstance(parsed, dict) and parsed.get("error"):
-                ctx.logger.warning(f"Received error as input, this might be a loop: {parsed}")
-                # Don't process errors as user input - return error to user
+        # Parse text to JSON and remove agent IDs
+        parsed_json = parse_text_to_json(user_input)
+        
+        # Initialize variables
+        user_request_text = user_input
+        location_from_json = None
+        start_time_from_json = None
+        end_time_from_json = None
+        
+        if parsed_json:
+            # Check if it's an error response
+            if parsed_json.get("error"):
+                ctx.logger.warning(f"Received error as input, this might be a loop: {parsed_json}")
                 error_msg = create_text_chat(json.dumps({"type": "error", "message": "Previous request failed. Please try again with a new request."}))
                 await ctx.send(sender, error_msg)
                 return
-        except (json.JSONDecodeError, ValueError):
-            # Not JSON, continue normally
-            pass
+            
+            # Check if it's the new JSON format with start_time, end_time, location, user_request
+            if "user_request" in parsed_json and "location" in parsed_json:
+                user_request_text = parsed_json.get("user_request", "")
+                location_from_json = parsed_json.get("location", "")
+                start_time_from_json = parsed_json.get("start_time")
+                end_time_from_json = parsed_json.get("end_time")
+                ctx.logger.info(f"Parsed JSON input: location={location_from_json}, start_time={start_time_from_json}, end_time={end_time_from_json}")
+            else:
+                # JSON but not the expected format, treat user_request as the cleaned text
+                user_request_text = remove_agent_ids(user_input)
+        else:
+            # Not JSON, remove agent IDs and use as plain text
+            user_request_text = remove_agent_ids(user_input)
         
-        ctx.logger.info(f"Processing user input: {user_input[:100]}...")
+        ctx.logger.info(f"Processing user request: {user_request_text[:100]}...")
         
         # Get conversation state from storage
         conversation_state_key = f"conversation_state_{sender}"
         conversation_state = ctx.storage.get(conversation_state_key)
         
-        # Initialize state
+        # Initialize state with JSON values if provided
         initial_state: OrchestratorState = {
-            "user_input": user_input,
+            "user_input": user_request_text,  # Use user_request for intent dispatcher
             "sender": sender,
             "conversation_state": conversation_state,
             "dispatch_result": None,
             "dispatch_plan": None,
             "activities": [],
-            "location": "",
+            "location": location_from_json or "",  # Use location from JSON
             "budget": 0.0,
             "timeframe": "",
+            "start_time": start_time_from_json,  # Use start_time from JSON
+            "end_time": end_time_from_json,  # Use end_time from JSON
             "fund_allocation_response": None,
             "events_scraper_response": None,
             "final_output": None,
