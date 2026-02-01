@@ -39,6 +39,8 @@ class ScrapedActivity(Model):
     duration: str
     best_time: str  # e.g., "morning", "afternoon", "evening"
     difficulty: str  # "easy", "moderate", "challenging"
+    address: Optional[str] = None
+    phone: Optional[str] = None
     url: Optional[str] = None
 
 class ScraperResponse(Model):
@@ -318,6 +320,8 @@ def format_scraper_response(
             duration=activity_data.get("duration", ""),
             best_time=activity_data.get("best_time", ""),
             difficulty=activity_data.get("difficulty", ""),
+            address=activity_data.get("address"),
+            phone=activity_data.get("phone"),
             url=activity_data.get("url")
         )
         activities_list.append(activity)
@@ -509,26 +513,19 @@ async def handle_scraper_request(ctx: Context, sender: str, msg: ChatMessage):
                     budget_analysis
                 )
                 
-                # Convert to JSON-serializable format
+                # Convert to JSON-serializable format - exclude description, difficulty, duration, best_time
                 response_json = {
-                    "type": "scraper_response",
-                    "location": response.location,
-                    "total_activities_found": response.total_activities_found,
                     "activities": [
                         {
                             "name": a.name,
+                            "address": a.address,
+                            "phone": a.phone,
+                            "url": a.url,
                             "category": a.category,
-                            "description": a.description,
-                            "estimated_cost": a.estimated_cost,
-                            "duration": a.duration,
-                            "best_time": a.best_time,
-                            "difficulty": a.difficulty,
-                            "url": a.url
+                            "estimated_cost": a.estimated_cost
                         }
                         for a in response.activities
-                    ],
-                    "budget_analysis": response.budget_analysis,
-                    "recommendations": response.recommendations
+                    ]
                 }
                 
                 ctx.logger.info(f"Sending response to {sender}")
