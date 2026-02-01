@@ -5,7 +5,7 @@
 
 In the age of chat bots, AI, despite the technological opportunities it presents, has garnered a reputation as a weapon of division and as a roadblock to truly personal interaction with other humans. However, after listening to the presentations given by the Visa team, our team determined that this was not a hard rule; in fact, just the opposite. After learning about the upcoming Visa Intelligent Commerce api, we saw the potential that AI agents have to turn daily planning from a complex task into the path of least resistance. In doing so, we aim to show that AI can be used to foster a stronger and more connected community than ever before.
 
-![Test Text](demoImageHatB.PNG)
+![Demo Image of our solution](demoImageHatB.PNG)
 
 # What it does
 
