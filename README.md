@@ -9,7 +9,7 @@ In the age of chat bots, AI, despite the technological opportunities it presents
 
 # What it does
 
-Our web app mobilizes AI agents to scour the internet for events and venues that match a user's profile defined by their interests. These agents coordinate to build a schedule to fill a user's free time. From here, the user must consent to the corresponding payments. This service allows a long effort into something trivial.
+Our web app mobilizes AI agents to scour the internet for events and venues that match a user's profile defined by their interests. These agents coordinate to build a schedule to fill a user's free time. From here, the user must consent to the corresponding payments. This service transforms a long, tedious effort into something quick, easy, and efficient.
 
 
 # How we built it
