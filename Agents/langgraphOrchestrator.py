@@ -19,6 +19,14 @@ import re
 from dotenv import load_dotenv
 from langgraph.graph import StateGraph, END
 
+# Import Gemini fallback
+try:
+    from gemini_fallback import generate_schedule_with_gemini
+    GEMINI_FALLBACK_AVAILABLE = True
+except ImportError:
+    GEMINI_FALLBACK_AVAILABLE = False
+    print("Warning: Gemini fallback not available. Install google-generativeai for fallback support.")
+
 load_dotenv()
 
 # ============================================================
@@ -210,12 +218,34 @@ async def call_intent_dispatcher_agent(
         
         # Use send_and_receive - acknowledgements are disabled in agents.py
         ctx.logger.info("Waiting for response from intent dispatcher using send_and_receive...")
-        reply, status = await ctx.send_and_receive(
-            INTENT_DISPATCHER_AGENT_ADDRESS,
-            message,
-            response_type=ChatMessage,  # Expect ChatMessage response
-            timeout=120.0
-        )
+        ctx.logger.info(f"Orchestrator will wait up to 120 seconds for response...")
+        ctx.logger.info(f"Sent message ID: {message.msg_id}, expecting response from: {INTENT_DISPATCHER_AGENT_ADDRESS}")
+        try:
+            reply, status = await ctx.send_and_receive(
+                INTENT_DISPATCHER_AGENT_ADDRESS,
+                message,
+                response_type=ChatMessage,  # Expect ChatMessage response
+                timeout=120.0
+            )
+            ctx.logger.info(f"send_and_receive returned: reply type={type(reply)}, status={status}")
+            if reply:
+                ctx.logger.info(f"Reply message ID: {reply.msg_id if hasattr(reply, 'msg_id') else 'N/A'}")
+                ctx.logger.info(f"Reply timestamp: {reply.timestamp if hasattr(reply, 'timestamp') else 'N/A'}")
+            
+            # Validate we got a proper reply
+            if reply is None:
+                ctx.logger.error("send_and_receive returned None reply - this should not happen if status is OK")
+                return {"type": "error", "data": {"error": "No response received from intent dispatcher"}}
+                
+        except asyncio.TimeoutError:
+            ctx.logger.error("Timeout waiting for intent dispatcher response (120s)")
+            ctx.logger.error("This means the intent dispatcher did not send a response within 120 seconds")
+            return {"type": "error", "data": {"error": "Timeout waiting for intent dispatcher response"}}
+        except Exception as e:
+            ctx.logger.error(f"Exception in send_and_receive: {e}")
+            import traceback
+            ctx.logger.error(traceback.format_exc())
+            return {"type": "error", "data": {"error": f"Error in send_and_receive: {str(e)}"}}
         
         if isinstance(reply, ChatMessage):
             # Extract text content from ChatMessage
@@ -326,13 +356,31 @@ def extract_parameters_node(state: OrchestratorState) -> OrchestratorState:
         
         # Extract activities and budget from dispatch plan (from user_request)
         activities = dispatch_plan.get("activity_list", [])
+        # Limit interests to maximum of 3
+        if len(activities) > 3:
+            activities = activities[:3]
         constraints = dispatch_plan.get("constraints", {})
         
         state["activities"] = activities
         # Location, start_time, end_time come from JSON input (already set in handle_user_message)
         # Only override location if not already set from JSON
         if not state.get("location"):
-            state["location"] = constraints.get("location", "")
+            location_from_constraints = constraints.get("location", "")
+            # Validate location is not an error message
+            if location_from_constraints:
+                invalid_location_patterns = [
+                    "parse input string",
+                    "unable to parse",
+                    "invalid",
+                    "error",
+                    "expected formats",
+                    "please provide"
+                ]
+                location_lower = str(location_from_constraints).lower()
+                if any(pattern in location_lower for pattern in invalid_location_patterns):
+                    state["error"] = f"Invalid location from dispatch plan: {location_from_constraints} (appears to be an error message)"
+                    return state
+            state["location"] = location_from_constraints
         
         # Budget comes from dispatch plan (extracted from user_request)
         state["budget"] = constraints.get("budget") or 500.0  # Default budget if not provided
@@ -371,6 +419,25 @@ def extract_parameters_node(state: OrchestratorState) -> OrchestratorState:
 
 async def call_fund_allocation_agent(ctx: Context, activities: List[str], location: str, budget: float) -> Dict:
     """Call fund allocation agent using send_and_receive"""
+    ctx.logger.info(f"[Fund Allocation] Starting call to fund allocation agent: location={location}, budget={budget}, activities={activities}")
+    
+    # Validate location is not an error message before sending
+    invalid_location_patterns = [
+        "parse input string",
+        "unable to parse",
+        "invalid",
+        "error",
+        "expected formats",
+        "please provide"
+    ]
+    location_lower = str(location).lower() if location else ""
+    if not location or any(pattern in location_lower for pattern in invalid_location_patterns):
+        ctx.logger.error(f"Invalid location detected before calling fund allocation agent: {location}")
+        return {
+            "error": f"Invalid location: '{location}'. Please provide a valid city or location name.",
+            "activities": {}
+        }
+    
     try:
         request_data = {
             "activities": activities,
@@ -385,14 +452,30 @@ async def call_fund_allocation_agent(ctx: Context, activities: List[str], locati
         )
         
         ctx.logger.info(f"Sending request to fund allocation agent: {FUND_ALLOCATION_AGENT_ADDRESS}")
+        ctx.logger.info(f"Request data: {json.dumps(request_data)[:200]}...")
         
         # Use send_and_receive
-        reply, status = await ctx.send_and_receive(
-            FUND_ALLOCATION_AGENT_ADDRESS,
-            message,
-            response_type=ChatMessage,
-            timeout=120.0
-        )
+        ctx.logger.info(f"Waiting for response from fund allocation agent (timeout: 120s)...")
+        try:
+            reply, status = await ctx.send_and_receive(
+                FUND_ALLOCATION_AGENT_ADDRESS,
+                message,
+                response_type=ChatMessage,
+                timeout=120.0
+            )
+            ctx.logger.info(f"send_and_receive returned: reply type={type(reply)}, status={status}")
+            
+            if reply is None:
+                ctx.logger.error("send_and_receive returned None reply from fund allocation agent")
+                return {"error": "No response received from fund allocation agent"}
+        except asyncio.TimeoutError:
+            ctx.logger.error("Timeout waiting for fund allocation agent response (120s)")
+            return {"error": "Timeout waiting for fund allocation agent response"}
+        except Exception as e:
+            ctx.logger.error(f"Exception in send_and_receive for fund allocation: {e}")
+            import traceback
+            ctx.logger.error(traceback.format_exc())
+            return {"error": f"Error in send_and_receive: {str(e)}"}
         
         if isinstance(reply, ChatMessage):
             # Extract text content
@@ -414,9 +497,14 @@ async def call_fund_allocation_agent(ctx: Context, activities: List[str], locati
                 ctx.logger.error(f"JSON parse error: {e}, content: {response_text[:200]}")
                 return {"error": "Failed to parse fund allocation response"}
         else:
-            ctx.logger.error(f"Failed to receive response from fund allocation agent: {status}")
+            ctx.logger.error(f"Failed to receive response from fund allocation agent: status={status}, reply type={type(reply)}")
+            if reply is not None:
+                ctx.logger.error(f"Reply content: {str(reply)[:500]}")
             return {"error": f"Failed to receive response: {status}"}
         
+    except asyncio.TimeoutError as e:
+        ctx.logger.error(f"Timeout waiting for fund allocation agent response: {e}")
+        return {"error": "Timeout waiting for fund allocation agent response"}
     except Exception as e:
         ctx.logger.error(f"Error calling fund allocation agent: {e}")
         import traceback
@@ -425,7 +513,25 @@ async def call_fund_allocation_agent(ctx: Context, activities: List[str], locati
 
 async def call_events_scraper_agent(ctx: Context, activities: List[str], location: str, budget: float, timeframe: str) -> Dict:
     """Call events scraper agent using send_and_receive"""
+    ctx.logger.info(f"[Events Scraper] Starting call to events scraper agent: location={location}, budget={budget}, timeframe={timeframe}, activities={activities}")
     try:
+        # Validate location is not an error message before sending
+        invalid_location_patterns = [
+            "parse input string",
+            "unable to parse",
+            "invalid",
+            "error",
+            "expected formats",
+            "please provide"
+        ]
+        location_lower = str(location).lower() if location else ""
+        if not location or any(pattern in location_lower for pattern in invalid_location_patterns):
+            ctx.logger.error(f"Invalid location detected before calling events scraper: {location}")
+            return {
+                "error": f"Invalid location: '{location}'. Please provide a valid city or location name.",
+                "activities": []
+            }
+        
         request_data = {
             "location": location,
             "timeframe": timeframe,
@@ -439,15 +545,31 @@ async def call_events_scraper_agent(ctx: Context, activities: List[str], locatio
             content=[TextContent(type="text", text=json.dumps(request_data))],
         )
         
-        ctx.logger.info(f"Sending request to events scraper agent: {EVENTS_SCRAPER_AGENT_ADDRESS}")
+        ctx.logger.info(f"[Events Scraper] Sending request to events scraper agent: {EVENTS_SCRAPER_AGENT_ADDRESS}")
+        ctx.logger.info(f"[Events Scraper] Request data: {json.dumps(request_data)[:200]}...")
         
         # Use send_and_receive
-        reply, status = await ctx.send_and_receive(
-            EVENTS_SCRAPER_AGENT_ADDRESS,
-            message,
-            response_type=ChatMessage,
-            timeout=120.0
-        )
+        ctx.logger.info(f"[Events Scraper] Waiting for response from events scraper agent (timeout: 120s)...")
+        try:
+            reply, status = await ctx.send_and_receive(
+                EVENTS_SCRAPER_AGENT_ADDRESS,
+                message,
+                response_type=ChatMessage,
+                timeout=120.0
+            )
+            ctx.logger.info(f"send_and_receive returned: reply type={type(reply)}, status={status}")
+            
+            if reply is None:
+                ctx.logger.error("send_and_receive returned None reply from events scraper agent")
+                return {"error": "No response received from events scraper agent"}
+        except asyncio.TimeoutError as e:
+            ctx.logger.error(f"Timeout waiting for events scraper agent response: {e}")
+            return {"error": "Timeout waiting for events scraper agent response"}
+        except Exception as e:
+            ctx.logger.error(f"Exception in send_and_receive: {e}")
+            import traceback
+            ctx.logger.error(traceback.format_exc())
+            return {"error": f"Error in send_and_receive: {str(e)}"}
         
         if isinstance(reply, ChatMessage):
             # Extract text content
@@ -461,6 +583,7 @@ async def call_events_scraper_agent(ctx: Context, activities: List[str], locatio
                 return {"error": "No text content in response"}
             
             ctx.logger.info(f"Received response from events scraper agent: {len(response_text)} chars")
+            ctx.logger.info(f"Response preview: {response_text[:200]}...")
             
             # Parse JSON response
             try:
@@ -469,7 +592,9 @@ async def call_events_scraper_agent(ctx: Context, activities: List[str], locatio
                 ctx.logger.error(f"JSON parse error: {e}, content: {response_text[:200]}")
                 return {"error": "Failed to parse events scraper response"}
         else:
-            ctx.logger.error(f"Failed to receive response from events scraper agent: {status}")
+            ctx.logger.error(f"Failed to receive response from events scraper agent: status={status}, reply type={type(reply)}")
+            if reply is not None:
+                ctx.logger.error(f"Reply content: {str(reply)[:500]}")
             return {"error": f"Failed to receive response: {status}"}
         
     except Exception as e:
@@ -496,12 +621,25 @@ async def call_budget_filter_agent(ctx: Context, events_response: Dict, fund_res
         ctx.logger.info(f"Sending request to budget filter agent: {BUDGET_FILTER_AGENT_ADDRESS}")
         
         # Use send_and_receive
-        reply, status = await ctx.send_and_receive(
-            BUDGET_FILTER_AGENT_ADDRESS,
-            message,
-            response_type=ChatMessage,
-            timeout=120.0
-        )
+        try:
+            reply, status = await ctx.send_and_receive(
+                BUDGET_FILTER_AGENT_ADDRESS,
+                message,
+                response_type=ChatMessage,
+                timeout=120.0
+            )
+            
+            if reply is None:
+                ctx.logger.error("send_and_receive returned None reply from budget filter agent")
+                return {"error": "No response received from budget filter agent"}
+        except asyncio.TimeoutError:
+            ctx.logger.error("Timeout waiting for budget filter agent response (120s)")
+            return {"error": "Timeout waiting for budget filter agent response"}
+        except Exception as e:
+            ctx.logger.error(f"Exception in send_and_receive for budget filter: {e}")
+            import traceback
+            ctx.logger.error(traceback.format_exc())
+            return {"error": f"Error in send_and_receive: {str(e)}"}
         
         if isinstance(reply, ChatMessage):
             # Extract text content
@@ -547,46 +685,99 @@ async def parallel_agent_calls_node(state: OrchestratorState, ctx: Context) -> O
         ctx.logger.info(f"Calling agents in parallel: activities={activities}, location={location}, budget={budget}")
         
         # Create tasks for parallel execution
+        ctx.logger.info(f"[Parallel Calls] Creating tasks for fund allocation and events scraper...")
         fund_allocation_task = call_fund_allocation_agent(ctx, activities, location, budget)
         events_scraper_task = call_events_scraper_agent(ctx, activities, location, budget, timeframe)
         
         # Execute both in parallel
-        fund_allocation_response, events_scraper_response = await asyncio.gather(
-            fund_allocation_task,
-            events_scraper_task,
-            return_exceptions=True
-        )
+        ctx.logger.info(f"[Parallel Calls] Starting asyncio.gather to wait for both responses...")
+        try:
+            fund_allocation_response, events_scraper_response = await asyncio.gather(
+                fund_allocation_task,
+                events_scraper_task,
+                return_exceptions=True
+            )
+            ctx.logger.info(f"[Parallel Calls] asyncio.gather completed. Fund allocation type: {type(fund_allocation_response)}, Events scraper type: {type(events_scraper_response)}")
+        except Exception as e:
+            ctx.logger.error(f"[Parallel Calls] Exception in asyncio.gather: {e}")
+            import traceback
+            ctx.logger.error(traceback.format_exc())
+            raise
         
         # Handle exceptions
         if isinstance(fund_allocation_response, Exception):
             ctx.logger.error(f"Fund allocation error: {fund_allocation_response}")
             state["fund_allocation_response"] = {"error": str(fund_allocation_response)}
         else:
+            ctx.logger.info(f"Fund allocation response received: {type(fund_allocation_response)}, keys: {list(fund_allocation_response.keys()) if isinstance(fund_allocation_response, dict) else 'N/A'}")
+            if isinstance(fund_allocation_response, dict) and "error" in fund_allocation_response:
+                ctx.logger.warning(f"Fund allocation response contains error: {fund_allocation_response.get('error')}")
             state["fund_allocation_response"] = fund_allocation_response
         
         if isinstance(events_scraper_response, Exception):
             ctx.logger.error(f"Events scraper error: {events_scraper_response}")
             state["events_scraper_response"] = {"error": str(events_scraper_response)}
         else:
+            ctx.logger.info(f"Events scraper response received: {type(events_scraper_response)}, keys: {list(events_scraper_response.keys()) if isinstance(events_scraper_response, dict) else 'N/A'}")
+            if isinstance(events_scraper_response, dict) and "error" in events_scraper_response:
+                ctx.logger.warning(f"Events scraper response contains error: {events_scraper_response.get('error')}")
             state["events_scraper_response"] = events_scraper_response
         
+        ctx.logger.info(f"[Parallel Calls] Both agent responses processed. Moving to budget filter node...")
         return state
     except Exception as e:
         state["error"] = f"Parallel agent calls error: {str(e)}"
         return state
 
 async def call_budget_filter_node(state: OrchestratorState, ctx: Context) -> OrchestratorState:
-    """Node 4: Call budget filter agent with both agent outputs"""
+    """Node 4: Call budget filter agent with both agent outputs, or use Gemini fallback if agents failed"""
     try:
+        ctx.logger.info(f"[Budget Filter] Starting budget filter node...")
         fund_allocation = state.get("fund_allocation_response", {})
         events_scraper = state.get("events_scraper_response", {})
         activities = state.get("activities", [])  # These are the interest_activities
         
-        # Check for errors
-        if fund_allocation.get("error") or events_scraper.get("error"):
-            ctx.logger.warning("One or both agents returned errors, skipping budget filter")
-            state["budget_filter_response"] = {"error": "Cannot filter due to agent errors"}
+        ctx.logger.info(f"[Budget Filter] Fund allocation type: {type(fund_allocation)}, has error: {fund_allocation.get('error') if isinstance(fund_allocation, dict) else 'N/A'}")
+        ctx.logger.info(f"[Budget Filter] Events scraper type: {type(events_scraper)}, has error: {events_scraper.get('error') if isinstance(events_scraper, dict) else 'N/A'}")
+        
+        # Check for errors - if both agents failed, try Gemini fallback immediately
+        if fund_allocation.get("error") and events_scraper.get("error"):
+            ctx.logger.warning("Both agents returned errors, attempting Gemini fallback...")
+            
+            if GEMINI_FALLBACK_AVAILABLE:
+                try:
+                    location = state.get("location", "")
+                    budget = state.get("budget", 0)
+                    start_time = state.get("start_time")
+                    end_time = state.get("end_time")
+                    
+                    if location and budget > 0 and activities:
+                        ctx.logger.info(f"[Budget Filter] Using Gemini fallback: location={location}, budget={budget}, activities={activities}")
+                        gemini_result = generate_schedule_with_gemini(
+                            location=location,
+                            budget=budget,
+                            interest_activities=activities,
+                            start_time=start_time,
+                            end_time=end_time
+                        )
+                        
+                        if gemini_result and not gemini_result.get("error"):
+                            ctx.logger.info(f"[Budget Filter] ✓ Gemini fallback succeeded")
+                            state["budget_filter_response"] = gemini_result
+                            return state
+                        else:
+                            ctx.logger.warning(f"[Budget Filter] Gemini fallback also failed: {gemini_result.get('error') if gemini_result else 'No response'}")
+                    else:
+                        ctx.logger.warning(f"[Budget Filter] Cannot use Gemini fallback: missing data")
+                except Exception as gemini_err:
+                    ctx.logger.error(f"[Budget Filter] Exception in Gemini fallback: {gemini_err}")
+            
+            # If fallback failed or not available, set error
+            state["budget_filter_response"] = {"error": "Cannot filter due to agent errors and Gemini fallback unavailable/failed"}
             return state
+        elif fund_allocation.get("error") or events_scraper.get("error"):
+            ctx.logger.warning("One agent returned error, attempting budget filter with available data")
+            # Continue with partial data - budget filter might still work
         
         # Add interest_activities to events_scraper data for budget filter
         # EventsScraperAgent doesn't return interest_activities, so we add them from state
@@ -605,17 +796,22 @@ async def call_budget_filter_node(state: OrchestratorState, ctx: Context) -> Orc
         ctx.logger.info("Calling budget filter agent with both agent outputs")
         
         # Call budget filter agent
+        ctx.logger.info(f"[Budget Filter] Calling budget filter agent...")
         budget_filter_response = await call_budget_filter_agent(ctx, events_with_interests, fund_with_times)
+        ctx.logger.info(f"[Budget Filter] Budget filter response received: {type(budget_filter_response)}, has error: {budget_filter_response.get('error') if isinstance(budget_filter_response, dict) else 'N/A'}")
         
         state["budget_filter_response"] = budget_filter_response
+        ctx.logger.info(f"[Budget Filter] Node completed. Moving to combine outputs node...")
         return state
     except Exception as e:
         state["error"] = f"Budget filter error: {str(e)}"
         return state
 
 def combine_outputs_node(state: OrchestratorState) -> OrchestratorState:
-    """Node 5: Return budget filter output as final result"""
+    """Node 5: Return budget filter output as final result, with Gemini fallback"""
+    # Note: This node doesn't have ctx, so we use print for logging
     try:
+        print(f"[Combine Outputs] === Starting combine outputs node ===")
         budget_filter = state.get("budget_filter_response", {})
         
         # Log what we got from budget filter
@@ -623,25 +819,80 @@ def combine_outputs_node(state: OrchestratorState) -> OrchestratorState:
         print(f"[Combine Outputs] Budget filter response keys: {list(budget_filter.keys()) if isinstance(budget_filter, dict) else 'not a dict'}")
         print(f"[Combine Outputs] Budget filter has error: {budget_filter.get('error') if isinstance(budget_filter, dict) else 'N/A'}")
         
-        # Use filtered output if available, otherwise return error
+        # Use filtered output if available, otherwise try Gemini fallback
         if budget_filter and not budget_filter.get("error"):
             # Return just the budget filter output - it contains everything needed
             state["final_output"] = budget_filter
-            print(f"[Combine Outputs] Set final_output from budget_filter: {len(str(budget_filter))} chars")
+            print(f"[Combine Outputs] ✓ Set final_output from budget_filter: {len(str(budget_filter))} chars")
         else:
-            # If filter failed, return error response
+            # If filter failed, try Gemini fallback
             error_msg = budget_filter.get("error", "Budget filter not executed") if isinstance(budget_filter, dict) else "Budget filter response is invalid"
-            state["final_output"] = {
-                "type": "error",
-                "message": error_msg,
-                "location": state.get("location", ""),
-                "budget": state.get("budget", 0)
-            }
-            print(f"[Combine Outputs] Set final_output to error: {error_msg}")
+            print(f"[Combine Outputs] Budget filter failed: {error_msg}")
+            print(f"[Combine Outputs] Attempting Gemini AI fallback...")
+            
+            # Try Gemini fallback
+            if GEMINI_FALLBACK_AVAILABLE:
+                try:
+                    location = state.get("location", "")
+                    budget = state.get("budget", 0)
+                    activities = state.get("activities", [])
+                    start_time = state.get("start_time")
+                    end_time = state.get("end_time")
+                    
+                    if location and budget > 0 and activities:
+                        print(f"[Combine Outputs] Calling Gemini fallback with location={location}, budget={budget}, activities={activities}")
+                        gemini_result = generate_schedule_with_gemini(
+                            location=location,
+                            budget=budget,
+                            interest_activities=activities,
+                            start_time=start_time,
+                            end_time=end_time
+                        )
+                        
+                        if gemini_result and not gemini_result.get("error"):
+                            state["final_output"] = gemini_result
+                            print(f"[Combine Outputs] ✓ Set final_output from Gemini fallback: {len(str(gemini_result))} chars")
+                        else:
+                            gemini_error = gemini_result.get("error", "Unknown Gemini error") if gemini_result else "No response from Gemini"
+                            print(f"[Combine Outputs] ✗ Gemini fallback failed: {gemini_error}")
+                            state["final_output"] = {
+                                "type": "error",
+                                "message": f"Both budget filter and Gemini fallback failed. Budget filter: {error_msg}. Gemini: {gemini_error}",
+                                "location": location,
+                                "budget": budget
+                            }
+                    else:
+                        print(f"[Combine Outputs] ✗ Cannot use Gemini fallback: missing required data (location={location}, budget={budget}, activities={activities})")
+                        state["final_output"] = {
+                            "type": "error",
+                            "message": error_msg,
+                            "location": state.get("location", ""),
+                            "budget": state.get("budget", 0)
+                        }
+                except Exception as gemini_err:
+                    print(f"[Combine Outputs] ✗ Exception in Gemini fallback: {gemini_err}")
+                    import traceback
+                    print(traceback.format_exc())
+                    state["final_output"] = {
+                        "type": "error",
+                        "message": f"Budget filter failed and Gemini fallback error: {str(gemini_err)}",
+                        "location": state.get("location", ""),
+                        "budget": state.get("budget", 0)
+                    }
+            else:
+                # No fallback available
+                print(f"[Combine Outputs] ✗ No Gemini fallback available")
+                state["final_output"] = {
+                    "type": "error",
+                    "message": error_msg,
+                    "location": state.get("location", ""),
+                    "budget": state.get("budget", 0)
+                }
         
+        print(f"[Combine Outputs] === Combine outputs node completed ===")
         return state
     except Exception as e:
-        print(f"[Combine Outputs] Error: {e}")
+        print(f"[Combine Outputs] ✗ Error: {e}")
         import traceback
         print(traceback.format_exc())
         state["error"] = f"Combine outputs error: {str(e)}"
@@ -685,65 +936,58 @@ def handle_error_node(state: OrchestratorState) -> OrchestratorState:
 # LangGraph Workflow Setup
 # ============================================================
 
-# Store workflow per context (since we need ctx in nodes)
-_workflows: Dict[str, Any] = {}
-
-def get_or_create_workflow(ctx: Context) -> Any:
-    """Get or create workflow for a context"""
-    ctx_id = str(id(ctx))
+# Store workflow - create fresh instance for each request to avoid state leakage
+def create_workflow(ctx: Context) -> Any:
+    """Create a new workflow instance for a context - prevents state leakage between requests"""
+    workflow = StateGraph(OrchestratorState)
     
-    if ctx_id not in _workflows:
-        workflow = StateGraph(OrchestratorState)
-        
-        # Create wrapper functions that capture ctx
-        def make_dispatch_node():
-            async def dispatch_node(state: OrchestratorState) -> OrchestratorState:
-                return await dispatch_intent_node(state, ctx)
-            return dispatch_node
-        
-        def make_parallel_node():
-            async def parallel_node(state: OrchestratorState) -> OrchestratorState:
-                return await parallel_agent_calls_node(state, ctx)
-            return parallel_node
-        
-        def make_budget_filter_node():
-            async def budget_filter_node(state: OrchestratorState) -> OrchestratorState:
-                return await call_budget_filter_node(state, ctx)
-            return budget_filter_node
-        
-        # Add nodes
-        workflow.add_node("dispatch_intent", make_dispatch_node())
-        workflow.add_node("extract_parameters", extract_parameters_node)
-        workflow.add_node("parallel_calls", make_parallel_node())
-        workflow.add_node("budget_filter", make_budget_filter_node())
-        workflow.add_node("combine_outputs", combine_outputs_node)
-        workflow.add_node("handle_clarification", handle_clarification_node)
-        workflow.add_node("handle_error", handle_error_node)
-        
-        # Set entry point
-        workflow.set_entry_point("dispatch_intent")
-        
-        # Add edges
-        workflow.add_conditional_edges(
-            "dispatch_intent",
-            should_continue,
-            {
-                "continue": "extract_parameters",
-                "clarification": "handle_clarification",
-                "error": "handle_error"
-            }
-        )
-        
-        workflow.add_edge("extract_parameters", "parallel_calls")
-        workflow.add_edge("parallel_calls", "budget_filter")
-        workflow.add_edge("budget_filter", "combine_outputs")
-        workflow.add_edge("combine_outputs", END)
-        workflow.add_edge("handle_clarification", END)
-        workflow.add_edge("handle_error", END)
-        
-        _workflows[ctx_id] = workflow.compile()
+    # Create wrapper functions that capture ctx
+    def make_dispatch_node():
+        async def dispatch_node(state: OrchestratorState) -> OrchestratorState:
+            return await dispatch_intent_node(state, ctx)
+        return dispatch_node
     
-    return _workflows[ctx_id]
+    def make_parallel_node():
+        async def parallel_node(state: OrchestratorState) -> OrchestratorState:
+            return await parallel_agent_calls_node(state, ctx)
+        return parallel_node
+    
+    def make_budget_filter_node():
+        async def budget_filter_node(state: OrchestratorState) -> OrchestratorState:
+            return await call_budget_filter_node(state, ctx)
+        return budget_filter_node
+    
+    # Add nodes
+    workflow.add_node("dispatch_intent", make_dispatch_node())
+    workflow.add_node("extract_parameters", extract_parameters_node)
+    workflow.add_node("parallel_calls", make_parallel_node())
+    workflow.add_node("budget_filter", make_budget_filter_node())
+    workflow.add_node("combine_outputs", combine_outputs_node)
+    workflow.add_node("handle_clarification", handle_clarification_node)
+    workflow.add_node("handle_error", handle_error_node)
+    
+    # Set entry point
+    workflow.set_entry_point("dispatch_intent")
+    
+    # Add edges
+    workflow.add_conditional_edges(
+        "dispatch_intent",
+        should_continue,
+        {
+            "continue": "extract_parameters",
+            "clarification": "handle_clarification",
+            "error": "handle_error"
+        }
+    )
+    
+    workflow.add_edge("extract_parameters", "parallel_calls")
+    workflow.add_edge("parallel_calls", "budget_filter")
+    workflow.add_edge("budget_filter", "combine_outputs")
+    workflow.add_edge("combine_outputs", END)
+    workflow.add_edge("handle_clarification", END)
+    workflow.add_edge("handle_error", END)
+    
+    return workflow.compile()
 
 # ============================================================
 # Message Handlers
@@ -752,32 +996,52 @@ def get_or_create_workflow(ctx: Context) -> Any:
 @chat_proto.on_message(ChatMessage)
 async def handle_user_message(ctx: Context, sender: str, msg: ChatMessage):
     """Handle incoming user messages and orchestrate workflow"""
+    ctx.logger.info(f">>> ENTERING handle_user_message - Sender: {sender[:30]}..., Message ID: {msg.msg_id}")
+    ctx.logger.info(f">>> Full sender address: {sender}")
+    ctx.logger.info(f">>> Message timestamp: {msg.timestamp}")
     
-    # FIRST: Check if this is from one of our target agents - ignore immediately
-    # With send_and_receive, responses should be handled automatically
-    # ALL messages from target agents should be ignored - they're either duplicates or stale
+    # Log message content preview
+    for item in msg.content:
+        if isinstance(item, TextContent):
+            ctx.logger.info(f">>> Message content preview: {item.text[:200]}")
+            break
+    
+    # FIRST: Check if this is from one of our target agents
+    # CRITICAL: send_and_receive intercepts messages BEFORE they reach this handler
+    # If a message from a target agent reaches here, it means:
+    # 1. send_and_receive already matched it (or timed out) - this is a duplicate/stale message
+    # 2. The message is too old to be a valid response
+    # We should filter these out to prevent processing them as user messages
     if sender in [INTENT_DISPATCHER_AGENT_ADDRESS, FUND_ALLOCATION_AGENT_ADDRESS, EVENTS_SCRAPER_AGENT_ADDRESS, BUDGET_FILTER_AGENT_ADDRESS]:
-        # Check message age - if it's old, definitely ignore
+        # Check message age - filter out old messages
         try:
             now = datetime.now(timezone.utc)
             msg_time = msg.timestamp
             if msg_time.tzinfo is None:
                 msg_time = msg_time.replace(tzinfo=timezone.utc)
             message_age = (now - msg_time).total_seconds()
-            if message_age > 60:  # Older than 1 minute - definitely stale
-                return  # Ignore silently
+            
+            # Filter out messages older than timeout window (120s) - definitely stale
+            if message_age > 150:  # Older than 2.5 minutes - definitely stale
+                ctx.logger.debug(f"Ignoring stale message from target agent (age: {message_age:.0f}s)")
+                return
         except Exception:
             pass
         
-        # Even if recent, ignore ALL messages from target agents
-        # send_and_receive handles responses, so any message here is a duplicate or unexpected
-        return  # Ignore silently - no logging to reduce noise
+        # If message reached here from a target agent, it means send_and_receive either:
+        # - Already matched it (this is a duplicate)
+        # - Timed out waiting for it (this arrived too late)
+        # - Didn't match it for some reason (wrong type, etc.)
+        # In all cases, we should ignore it to avoid processing as a user message
+        ctx.logger.debug(f"Ignoring message from target agent {sender[:30]}... (send_and_receive should have intercepted if valid)")
+        return
     
     # Now log the message (only if it's from a user, not a target agent)
     ctx.logger.info(f"=== Orchestrator received ChatMessage ===")
     ctx.logger.info(f"Sender: {sender}")
     ctx.logger.info(f"Orchestrator's own address: {ctx.agent.address}")
     ctx.logger.info(f"Message ID: {msg.msg_id}")
+    ctx.logger.info(f"Message timestamp: {msg.timestamp}")
     
     # Check if message is stale (older than 2 minutes) - be stricter to prevent old request floods
     # Handle both timezone-aware and timezone-naive timestamps
@@ -797,49 +1061,46 @@ async def handle_user_message(ctx: Context, sender: str, msg: ChatMessage):
         ctx.logger.warning(f"Error checking message age: {e}, proceeding with message")
     
     # Track processed message IDs to prevent duplicate processing
+    # Use a simpler, more reliable approach with shorter retention
     processed_messages_key = "processed_message_ids"
-    processed_ids_dict = ctx.storage.get(processed_messages_key) or {}
-    
-    # Clean old message IDs - remove entries older than 10 minutes and keep only last 50
     now_iso = datetime.now(timezone.utc).isoformat()
     now_dt = datetime.now(timezone.utc)
+    
+    # Get and clean processed IDs - keep only last 5 minutes
+    processed_ids_dict = ctx.storage.get(processed_messages_key) or {}
     cleaned_dict = {}
     for msg_id, timestamp_str in processed_ids_dict.items():
         try:
             timestamp_dt = datetime.fromisoformat(timestamp_str.replace('Z', '+00:00'))
             age = (now_dt - timestamp_dt).total_seconds()
-            if age < 600:  # Keep if less than 10 minutes old
+            if age < 300:  # Keep if less than 5 minutes old
                 cleaned_dict[msg_id] = timestamp_str
         except Exception:
             # Invalid timestamp, skip it
             continue
     
-    # If still too many, keep only most recent 50
-    if len(cleaned_dict) > 50:
-        sorted_ids = sorted(cleaned_dict.items(), key=lambda x: x[1], reverse=True)[:50]
+    # Limit to most recent 100 messages
+    if len(cleaned_dict) > 100:
+        sorted_ids = sorted(cleaned_dict.items(), key=lambda x: x[1], reverse=True)[:100]
         cleaned_dict = dict(sorted_ids)
-        ctx.logger.info(f"Cleared old processed message IDs, keeping {len(cleaned_dict)} most recent")
-    
-    processed_ids_dict = cleaned_dict
     
     # Check if we've already processed this message
     msg_id_str = str(msg.msg_id)
-    if msg_id_str in processed_ids_dict:
-        # Check if it's recent (within last 5 minutes)
+    if msg_id_str in cleaned_dict:
         try:
-            last_processed_time = processed_ids_dict[msg_id_str]
+            last_processed_time = cleaned_dict[msg_id_str]
             last_processed_dt = datetime.fromisoformat(last_processed_time.replace('Z', '+00:00'))
             time_since_processed = (now_dt - last_processed_dt).total_seconds()
             if time_since_processed < 300:  # 5 minutes
-                ctx.logger.debug(f"Ignoring duplicate message (ID: {msg.msg_id}, processed {time_since_processed:.0f}s ago)")
+                ctx.logger.info(f"Ignoring duplicate message (ID: {msg.msg_id}, processed {time_since_processed:.0f}s ago)")
                 return
         except Exception:
             # Can't parse timestamp, remove it and continue
-            del processed_ids_dict[msg_id_str]
+            pass
     
     # Mark this message as processed with timestamp
-    processed_ids_dict[msg_id_str] = now_iso
-    ctx.storage.set(processed_messages_key, processed_ids_dict)
+    cleaned_dict[msg_id_str] = now_iso
+    ctx.storage.set(processed_messages_key, cleaned_dict)
     
     # Log message content
     user_input_preview = ""
@@ -850,30 +1111,50 @@ async def handle_user_message(ctx: Context, sender: str, msg: ChatMessage):
             break
     
     
-    # Check for stale error messages - ignore error messages that look like they're from previous requests
-    if user_input_preview:
-        error_indicators = [
-            "Unable to parse input string into valid JSON",
-            "Previous request failed",
-            "type\": \"error\"",
-            "\"error\":",
-            "parse input string"  # This is the specific error from the terminal output
-        ]
-        if any(indicator in user_input_preview for indicator in error_indicators):
-            ctx.logger.info(f"Ignoring stale error message: {user_input_preview[:100]}")
-            return
+        # Check for stale error messages - ignore error messages that look like they're from previous requests
+        # Only check if message is recent (within last 2 minutes) to avoid blocking legitimate error messages
+        if user_input_preview:
+            try:
+                now = datetime.now(timezone.utc)
+                msg_time = msg.timestamp
+                if msg_time.tzinfo is None:
+                    msg_time = msg_time.replace(tzinfo=timezone.utc)
+                message_age = (now - msg_time).total_seconds()
+                
+                # Only ignore error messages if they're recent (likely stale duplicates)
+                if message_age < 120:  # Within last 2 minutes
+                    error_indicators = [
+                        "Unable to parse input string into valid JSON",
+                        "Previous request failed",
+                        "parse input string"  # This is the specific error from the terminal output
+                    ]
+                    if any(indicator in user_input_preview for indicator in error_indicators):
+                        ctx.logger.info(f"Ignoring recent error message (likely stale): {user_input_preview[:100]}")
+                        return
+            except Exception:
+                pass
         
-        # Check if the message looks like old response data from agents
+        # Check if the message looks like old response data from agents (only if recent)
         # Fund allocation responses have "activities" with "activity" and "cost" fields
         # Budget filter responses have "activities" with "start_time" and scheduled data
-        response_indicators = [
-            '"activities":' in user_input_preview and '"leftover_budget"' in user_input_preview,  # Fund allocation response
-            '"activities":' in user_input_preview and '"start_time":' in user_input_preview,  # Budget filter response
-            '"activity":' in user_input_preview and '"cost":' in user_input_preview,  # Fund allocation format
-        ]
-        if any(response_indicators):
-            ctx.logger.info(f"Ignoring message that looks like old agent response data")
-            return
+        if user_input_preview:
+            try:
+                now = datetime.now(timezone.utc)
+                msg_time = msg.timestamp
+                if msg_time.tzinfo is None:
+                    msg_time = msg_time.replace(tzinfo=timezone.utc)
+                message_age = (now - msg_time).total_seconds()
+                
+                if message_age < 120:  # Within last 2 minutes
+                    response_indicators = [
+                        '"activities":' in user_input_preview and '"leftover_budget"' in user_input_preview,  # Fund allocation response
+                        '"activities":' in user_input_preview and '"start_time":' in user_input_preview and '"cost":' in user_input_preview,  # Budget filter response
+                    ]
+                    if any(response_indicators):
+                        ctx.logger.info(f"Ignoring recent message that looks like old agent response data")
+                        return
+            except Exception:
+                pass
     
     # Otherwise, this is a user message - send acknowledgement
     try:
@@ -932,6 +1213,27 @@ async def handle_user_message(ctx: Context, sender: str, msg: ChatMessage):
                 location_from_json = parsed_json.get("location", "")
                 start_time_from_json = parsed_json.get("start_time")
                 end_time_from_json = parsed_json.get("end_time")
+                
+                # Validate location is not an error message
+                invalid_location_patterns = [
+                    "parse input string",
+                    "unable to parse",
+                    "invalid",
+                    "error",
+                    "expected formats",
+                    "please provide"
+                ]
+                location_lower = str(location_from_json).lower()
+                if any(pattern in location_lower for pattern in invalid_location_patterns):
+                    ctx.logger.warning(f"Invalid location detected (looks like error message): {location_from_json}")
+                    ctx.logger.warning(f"Ignoring this request - location appears to be an error message")
+                    error_msg = create_text_chat(json.dumps({
+                        "type": "error", 
+                        "message": "Invalid request: location appears to be an error message. Please send a new request with a valid location."
+                    }))
+                    await ctx.send(sender, error_msg)
+                    return
+                
                 ctx.logger.info(f"Parsed JSON input: location={location_from_json}, start_time={start_time_from_json}, end_time={end_time_from_json}")
             else:
                 # JSON but not the expected format, treat user_request as the cleaned text
@@ -1011,16 +1313,24 @@ async def handle_user_message(ctx: Context, sender: str, msg: ChatMessage):
             "error": None
         }
         
-        # Create and run workflow
-        workflow = get_or_create_workflow(ctx)
+        # Create and run workflow - create fresh instance to avoid state leakage
+        ctx.logger.info(f"Creating fresh workflow instance and starting execution...")
+        workflow = create_workflow(ctx)
+        ctx.logger.info(f"Workflow created, invoking with initial state...")
         final_state = await workflow.ainvoke(initial_state)
+        ctx.logger.info(f"Workflow execution completed. Final state keys: {list(final_state.keys())}")
         
         # Update conversation state if needed
         if final_state.get("conversation_state"):
             ctx.storage.set(conversation_state_key, final_state["conversation_state"])
-        elif conversation_state and final_state.get("final_output", {}).get("type") == "dispatch_plan":
-            # Clear conversation state after successful dispatch
+        elif final_state.get("final_output", {}).get("type") == "dispatch_plan":
+            # Clear conversation state after successful dispatch (request completed)
             ctx.storage.set(conversation_state_key, None)
+            ctx.logger.info("Cleared conversation state after successful dispatch")
+        elif final_state.get("final_output", {}).get("type") == "error":
+            # Clear conversation state on error to prevent stale state
+            ctx.storage.set(conversation_state_key, None)
+            ctx.logger.info("Cleared conversation state after error")
         
         # Send final output
         final_output = final_state.get("final_output", {})
@@ -1043,14 +1353,20 @@ async def handle_user_message(ctx: Context, sender: str, msg: ChatMessage):
             ctx.logger.error(traceback.format_exc())
         
     except Exception as e:
-        ctx.logger.error(f"Orchestrator error: {e}")
+        ctx.logger.error(f"=== Orchestrator error in handle_user_message ===")
+        ctx.logger.error(f"Sender: {sender}")
+        ctx.logger.error(f"Message ID: {msg.msg_id if 'msg' in locals() else 'unknown'}")
+        ctx.logger.error(f"Error: {e}")
         import traceback
         ctx.logger.error(traceback.format_exc())
         error_msg = create_text_chat(f"Error processing request: {str(e)}")
         try:
             await ctx.send(sender, error_msg)
-        except:
-            pass
+            ctx.logger.info(f"Sent error response to {sender[:20]}...")
+        except Exception as send_err:
+            ctx.logger.error(f"Failed to send error response: {send_err}")
+            import traceback
+            ctx.logger.error(traceback.format_exc())
 
 @chat_proto.on_message(ChatAcknowledgement)
 async def handle_ack(ctx: Context, sender: str, msg: ChatAcknowledgement):
@@ -1061,6 +1377,7 @@ async def handle_ack(ctx: Context, sender: str, msg: ChatAcknowledgement):
     # If this is from the intent dispatcher and we're waiting, log it
     if sender == INTENT_DISPATCHER_AGENT_ADDRESS:
         ctx.logger.info(f"Received acknowledgement from intent dispatcher while waiting for response")
+
 
 def create_text_chat(text: str, end_session: bool = False) -> ChatMessage:
     """Helper to create text chat message"""
@@ -1088,7 +1405,7 @@ _startup_cleanup_done = False
 
 @agent.on_interval(period=1.0)
 async def startup_cleanup_once(ctx: Context):
-    """Clean up old processed message IDs once on startup"""
+    """Clean up old processed message IDs and conversation states once on startup"""
     global _startup_cleanup_done
     if _startup_cleanup_done:
         return  # Only run once
@@ -1099,6 +1416,16 @@ async def startup_cleanup_once(ctx: Context):
     if old_ids:
         ctx.storage.set(processed_messages_key, {})
         ctx.logger.info(f"Cleared {len(old_ids)} old processed message IDs on startup")
+    
+    # Also clear any stale conversation states (older than 1 hour)
+    # We can't enumerate all keys, but we'll clear them as they're accessed
+    ctx.logger.info(f"Orchestrator is ready and listening for messages at {ctx.agent.address}")
+
+# Periodic heartbeat to show orchestrator is alive
+@agent.on_interval(period=30.0)
+async def heartbeat(ctx: Context):
+    """Periodic heartbeat to show orchestrator is alive"""
+    ctx.logger.debug(f"Orchestrator heartbeat - still listening at {ctx.agent.address}")
 
 if __name__ == "__main__":
     print(f"LangGraph Orchestrator Agent address: {agent.address}")

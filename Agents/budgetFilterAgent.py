@@ -633,9 +633,8 @@ def schedule_activities(venues: List[Dict], all_available_venues: Dict[str, List
             time_until_meal = (target_time - current_time).total_seconds() / 60
             
             # Find activities that fit in this gap
-            activities_to_add = []
-            temp_time = current_time
-            temp_cost = total_cost
+            # First, calculate transit times for all candidates and sort by transit time
+            candidates_with_transit = []
             prev_addr = scheduled[-1].get("address", "") if scheduled else ""
             
             for activity in all_activities_pool[:]:  # Copy list to iterate safely
@@ -647,7 +646,7 @@ def schedule_activities(venues: List[Dict], all_available_venues: Dict[str, List
                 act_duration = parse_duration(activity.get("duration", "1 hour"))
                 act_cost = activity.get("cost", 0)
                 
-                # Check transit time - reject if too far (more than 45 minutes)
+                # Check transit time - reject if too far (more than 30 minutes to keep transit times short)
                 transit_time = 0
                 if prev_addr and act_address and prev_addr != act_address:
                     # Quick estimate first
@@ -659,10 +658,26 @@ def schedule_activities(venues: List[Dict], all_available_venues: Dict[str, List
                         transit_info = research_transit(prev_addr, act_address, location)
                         transit_time = transit_info.get("duration_minutes", 15)
                     
-                    # Reject activities that are too far away
-                    if transit_time > 45:  # More than 45 minutes transit is too far
+                    # Reject activities that are too far away (reduced from 45 to 30 minutes)
+                    if transit_time > 30:  # More than 30 minutes transit is too far
                         continue
                 
+                total_needed = transit_time + act_duration
+                
+                # Check budget including reserved meal costs
+                if (current_time + timedelta(minutes=total_needed)) <= target_time and (total_cost + act_cost) <= (budget - remaining_meals_cost):
+                    candidates_with_transit.append((activity, transit_time, act_duration, act_cost))
+            
+            # Sort candidates by transit time (shortest first) to minimize transit times
+            candidates_with_transit.sort(key=lambda x: x[1])  # Sort by transit_time
+            
+            # Select activities in order of shortest transit time
+            activities_to_add = []
+            temp_time = current_time
+            temp_cost = total_cost
+            temp_prev_addr = prev_addr
+            
+            for activity, transit_time, act_duration, act_cost in candidates_with_transit:
                 total_needed = transit_time + act_duration
                 
                 # Check budget including reserved meal costs
@@ -670,7 +685,7 @@ def schedule_activities(venues: List[Dict], all_available_venues: Dict[str, List
                     activities_to_add.append((activity, transit_time))
                     temp_time += timedelta(minutes=total_needed)
                     temp_cost += act_cost
-                    prev_addr = act_address
+                    temp_prev_addr = activity.get("address", "")
                 elif len(activities_to_add) > 0:
                     break  # Can't fit more, but we have some
             
@@ -753,30 +768,33 @@ def schedule_activities(venues: List[Dict], all_available_venues: Dict[str, List
             meal_index += 1
     
     # Fill remaining time with other activities (pack multiple when possible)
-    # Be very aggressive about filling the time window - continue until we're within 10 minutes of end time
+    # Be very aggressive about filling the time window - continue until we're within 30 minutes of end time
+    # This ensures the itinerary doesn't end more than 30 minutes before the specified end time
     remaining_time = (end_datetime - current_time).total_seconds() / 60
     remaining_budget = budget - total_cost
     
-    # Sort other activities by proximity first, then duration (shorter first to pack more)
-    # Prioritize activities closer to current location to minimize transit
+    # Sort other activities by transit time first (shortest transit = highest priority), then duration, then cost
+    # This ensures we minimize transit times throughout the itinerary
     if scheduled:
         current_location = scheduled[-1].get("address", "")
         if current_location:
-            # Sort by: 1) proximity (estimated), 2) duration, 3) cost
-            def sort_key(activity):
+            # Pre-calculate transit times for all activities to sort by transit time
+            def calculate_transit_for_sorting(activity):
                 act_address = activity.get("address", "")
                 if act_address and current_location and act_address != current_location:
-                    # Quick proximity check - same street/city = closer
-                    from_parts = set(current_location.lower().split())
-                    to_parts = set(act_address.lower().split())
-                    common = len(from_parts & to_parts)
-                    proximity_score = -common  # Negative so more common = higher priority
-                else:
-                    proximity_score = 0  # Same location or no address
-                
+                    quick_estimate = estimate_transit_time_quick(current_location, act_address, location)
+                    if quick_estimate is not None:
+                        return quick_estimate
+                    # For sorting, use a conservative estimate - will be recalculated when actually scheduling
+                    return 20  # Default estimate for sorting
+                return 0  # Same location or no address
+            
+            # Sort by: 1) transit time (shortest first), 2) duration (shorter first to pack more), 3) cost
+            def sort_key(activity):
+                transit_time = calculate_transit_for_sorting(activity)
                 duration = parse_duration(activity.get("duration", "1 hour"))
                 cost = activity.get("cost", 0)
-                return (proximity_score, duration, cost)
+                return (transit_time, duration, cost)
             
             other_activities.sort(key=sort_key)
         else:
@@ -785,13 +803,18 @@ def schedule_activities(venues: List[Dict], all_available_venues: Dict[str, List
         other_activities.sort(key=lambda v: parse_duration(v.get("duration", "1 hour")))
     
     # First, use up all activities from the original list
-    while remaining_time > 10 and remaining_budget > 5 and other_activities:
+    # Continue until we're within 30 minutes of end time to ensure we fill the time constraint
+    # Even if other_activities is exhausted, we'll continue with all_available_venues below
+    while remaining_time > 30 and remaining_budget > 5 and other_activities:
         # Try to pack multiple activities in remaining time
         activities_to_add = []
         temp_time = current_time
         temp_cost = total_cost
         prev_addr = scheduled[-1].get("address", "") if scheduled else ""
         
+        # Calculate transit times for all candidates first, then sort by transit time
+        # This ensures we prioritize activities with shorter transit times
+        candidates_with_transit = []
         for activity in other_activities[:]:
             if activity.get("name") in scheduled_venue_names:
                 continue
@@ -801,7 +824,7 @@ def schedule_activities(venues: List[Dict], all_available_venues: Dict[str, List
             act_duration = parse_duration(activity.get("duration", "1 hour"))
             act_cost = activity.get("cost", 0)
             
-            # Check transit time - reject if too far (more than 45 minutes)
+            # Check transit time - reject if too far (more than 30 minutes to keep transit times short)
             transit_time = 0
             if prev_addr and act_address and prev_addr != act_address:
                 quick_estimate = estimate_transit_time_quick(prev_addr, act_address, location)
@@ -811,22 +834,34 @@ def schedule_activities(venues: List[Dict], all_available_venues: Dict[str, List
                     transit_info = research_transit(prev_addr, act_address, location)
                     transit_time = transit_info.get("duration_minutes", 15)
                 
-                # Reject activities that are too far away
-                if transit_time > 45:
+                # Reject activities that are too far away (reduced from 45 to 30 minutes)
+                if transit_time > 30:
                     continue
             
             total_needed = transit_time + act_duration
             
             if (temp_time + timedelta(minutes=total_needed)) <= end_datetime and (temp_cost + act_cost) <= budget:
+                candidates_with_transit.append((activity, transit_time, act_duration, act_cost))
+        
+        # Sort candidates by transit time (shortest first) to minimize transit times
+        candidates_with_transit.sort(key=lambda x: x[1])  # Sort by transit_time
+        
+        # Select activities in order of shortest transit time
+        for activity, transit_time, act_duration, act_cost in candidates_with_transit:
+            total_needed = transit_time + act_duration
+            if (temp_time + timedelta(minutes=total_needed)) <= end_datetime and (temp_cost + act_cost) <= budget:
                 activities_to_add.append((activity, transit_time))
                 temp_time += timedelta(minutes=total_needed)
                 temp_cost += act_cost
-                prev_addr = act_address
+                prev_addr = activity.get("address", "")
             else:
                 break  # Can't fit more
         
         if not activities_to_add:
-            break  # Can't fit any more activities
+            # Can't fit any more activities from other_activities list
+            # Remove activities that are too expensive or don't fit time-wise to avoid infinite loop
+            # But continue to all_available_venues section which will keep trying until < 30 mins
+            break  # Move to all_available_venues section
         
         # Add the activities
         for activity, transit_time in activities_to_add:
@@ -868,21 +903,43 @@ def schedule_activities(venues: List[Dict], all_available_venues: Dict[str, List
     
     # Aggressively fill remaining time from all_available_venues
     # Keep looping through categories until we can't fit any more activities
-    max_iterations = 10  # Prevent infinite loops
+    # Continue until we're within 30 minutes of end time to ensure we fill the time constraint
+    # Increase max_iterations to allow more attempts to fill the time window
+    max_iterations = 30  # Increased from 10 to allow more attempts to fill time
     iteration = 0
     added_any = True
     
-    while remaining_time > 10 and remaining_budget > 5 and added_any and iteration < max_iterations:
+    # Continue scheduling until less than 30 minutes remain, regardless of whether we added anything in previous iteration
+    # This ensures we keep trying to fill the time window
+    while remaining_time > 30 and remaining_budget > 5 and iteration < max_iterations:
         iteration += 1
         added_any = False
+        # Recalculate remaining time and budget at start of each iteration
+        # Get current time from last scheduled activity
+        if scheduled:
+            last_activity_end = scheduled[-1].get("end_time", "")
+            if isinstance(last_activity_end, str):
+                try:
+                    current_time = datetime.fromisoformat(last_activity_end.replace('Z', '+00:00'))
+                except:
+                    current_time = datetime.now()
+            else:
+                current_time = last_activity_end
+        else:
+            current_time = start_datetime
+        
         remaining_time = (end_datetime - current_time).total_seconds() / 60
         remaining_budget = budget - total_cost
+        
+        # If we're already within 30 minutes, break
+        if remaining_time <= 30:
+            break
         
         additional_categories = ["entertainment", "sightsee", "sightseeing", "cultural", "shop", "outdoor", "relax", "museum", "park", "gallery"]
         
         # Try to pack multiple activities from available venues
         for category in additional_categories:
-            if remaining_time <= 10:
+            if remaining_time <= 30:
                 break
             
             available_for_category = []
@@ -890,16 +947,9 @@ def schedule_activities(venues: List[Dict], all_available_venues: Dict[str, List
                 if match_venue_to_category(cat, category):
                     available_for_category.extend(venue_list)
             
-            # Sort by duration (shorter first) and cost (cheaper first)
-            available_for_category.sort(key=lambda v: (
-                parse_duration(v.get("duration", "1 hour")),
-                v.get("cost", 0)
-            ))
-            
-            # Try to pack multiple activities from this category
-            activities_to_add = []
-            temp_time = current_time
-            temp_cost = total_cost
+            # Calculate transit times for all venues first, then sort by transit time (shortest first)
+            # This ensures we prioritize venues with shorter transit times
+            candidates_with_transit = []
             prev_addr = scheduled[-1].get("address", "") if scheduled else ""
             
             for venue in available_for_category:
@@ -911,7 +961,7 @@ def schedule_activities(venues: List[Dict], all_available_venues: Dict[str, List
                 venue_address = venue.get("address", "")
                 venue_duration = parse_duration(venue.get("duration", "1 hour"))
                 
-                # Check transit time - reject if too far (more than 45 minutes)
+                # Check transit time - reject if too far (more than 30 minutes to keep transit times short)
                 transit_time = 0
                 if prev_addr and venue_address and prev_addr != venue_address:
                     quick_estimate = estimate_transit_time_quick(prev_addr, venue_address, location)
@@ -921,17 +971,32 @@ def schedule_activities(venues: List[Dict], all_available_venues: Dict[str, List
                         transit_info = research_transit(prev_addr, venue_address, location)
                         transit_time = transit_info.get("duration_minutes", 15)
                     
-                    # Reject venues that are too far away
-                    if transit_time > 45:
+                    # Reject venues that are too far away (reduced from 45 to 30 minutes)
+                    if transit_time > 30:
                         continue
                 
+                total_needed = transit_time + venue_duration
+                
+                if (current_time + timedelta(minutes=total_needed)) <= end_datetime and (total_cost + venue_cost) <= budget:
+                    candidates_with_transit.append((venue, transit_time, venue_duration, venue_cost))
+            
+            # Sort by transit time (shortest first) to minimize transit times
+            candidates_with_transit.sort(key=lambda x: x[1])  # Sort by transit_time
+            
+            # Try to pack multiple activities from this category, selecting shortest transit times first
+            activities_to_add = []
+            temp_time = current_time
+            temp_cost = total_cost
+            temp_prev_addr = prev_addr
+            
+            for venue, transit_time, venue_duration, venue_cost in candidates_with_transit:
                 total_needed = transit_time + venue_duration
                 
                 if (temp_time + timedelta(minutes=total_needed)) <= end_datetime and (temp_cost + venue_cost) <= budget:
                     activities_to_add.append((venue, transit_time))
                     temp_time += timedelta(minutes=total_needed)
                     temp_cost += venue_cost
-                    prev_addr = venue_address
+                    temp_prev_addr = venue.get("address", "")
                 else:
                     break  # Can't fit more from this category
             
@@ -971,6 +1036,137 @@ def schedule_activities(venues: List[Dict], all_available_venues: Dict[str, List
                     added_any = True
                     remaining_time = (end_datetime - current_time).total_seconds() / 60
                     remaining_budget = budget - total_cost
+    
+    # Final aggressive check: Keep adding activities until we're within 30 minutes of end time
+    # This ensures the itinerary doesn't end too early (e.g., ending at 2pm when end time is 6:50pm)
+    remaining_time = (end_datetime - current_time).total_seconds() / 60
+    remaining_budget = budget - total_cost
+    
+    # Keep looping until we're within 30 minutes of end time or can't add more
+    # Increased iterations to allow more attempts to fill large time gaps
+    max_final_iterations = 50  # Increased from 20 to allow filling large time gaps
+    final_iteration = 0
+    
+    while remaining_time > 30 and remaining_budget > 5 and final_iteration < max_final_iterations:
+        final_iteration += 1
+        # Try to find a short activity that fits in the remaining time
+        # Prioritize activities with very short transit times
+        current_location = scheduled[-1].get("address", "") if scheduled else ""
+        all_candidates = []
+        
+        # Collect all available venues that haven't been scheduled
+        for cat, venue_list in all_available_venues.items():
+            for venue in venue_list:
+                if venue.get("name") not in scheduled_venue_names:
+                    venue_address = venue.get("address", "")
+                    venue_duration = parse_duration(venue.get("duration", "1 hour"))
+                    venue_cost = venue.get("cost", 0)
+                    
+                    # Calculate transit time
+                    transit_time = 0
+                    if current_location and venue_address and current_location != venue_address:
+                        quick_estimate = estimate_transit_time_quick(current_location, venue_address, location)
+                        if quick_estimate is not None:
+                            transit_time = quick_estimate
+                        else:
+                            transit_info = research_transit(current_location, venue_address, location)
+                            transit_time = transit_info.get("duration_minutes", 15)
+                    
+                    total_needed = transit_time + venue_duration
+                    
+                    # Accept activities with transit up to 30 minutes (increased from 20 for more flexibility)
+                    if total_needed <= remaining_time and venue_cost <= remaining_budget and transit_time <= 30:
+                        all_candidates.append((venue, transit_time, venue_duration, venue_cost))
+        
+        # Sort by transit time (shortest first), then duration
+        all_candidates.sort(key=lambda x: (x[1], x[2]))
+        
+        if not all_candidates:
+            # No more candidates, break
+            break
+        
+        # Try to add the best candidate
+        venue, transit_time, venue_duration, venue_cost = all_candidates[0]
+        venue_name = venue.get("name", "")
+        venue_address = venue.get("address", "")
+        
+        # Get current time from last scheduled activity
+        if scheduled:
+            last_activity_end = scheduled[-1].get("end_time", "")
+            if isinstance(last_activity_end, str):
+                try:
+                    current_time = datetime.fromisoformat(last_activity_end.replace('Z', '+00:00'))
+                except:
+                    current_time = datetime.now()
+            else:
+                current_time = last_activity_end
+        else:
+            current_time = start_datetime
+        
+        # Add transit if needed
+        if scheduled and current_location and venue_address and current_location != venue_address:
+            transit_info = research_transit(current_location, venue_address, location)
+            transit_duration = transit_info.get("duration_minutes", 15)
+            transit_cost = transit_info.get("cost_usd", 0.0)
+            transit_method = transit_info.get("method", "walking")
+            
+            # Cap transit at 30 minutes (increased from 20 to allow more flexibility)
+            if transit_duration > 30:
+                transit_duration = 30
+                transit_method = "driving"
+            
+            if transit_duration <= 30 and (current_time + timedelta(minutes=transit_duration)) <= end_datetime:
+                transit_activity = {
+                    "type": "transit",
+                    "venue": f"Travel via {transit_method}",
+                    "category": "transit",
+                    "start_time": current_time.isoformat(),
+                    "end_time": (current_time + timedelta(minutes=transit_duration)).isoformat(),
+                    "duration_minutes": transit_duration,
+                    "cost": transit_cost,
+                    "description": transit_info.get("description", f"Travel to {venue_name}"),
+                    "method": transit_method,
+                    "address": venue_address
+                }
+                scheduled.append(transit_activity)
+                current_time += timedelta(minutes=transit_duration)
+                total_cost += transit_cost
+        
+        # Update current_time after transit
+        if scheduled:
+            last_activity_end = scheduled[-1].get("end_time", "")
+            if isinstance(last_activity_end, str):
+                try:
+                    current_time = datetime.fromisoformat(last_activity_end.replace('Z', '+00:00'))
+                except:
+                    current_time = datetime.now()
+            else:
+                current_time = last_activity_end
+        
+        # Add activity
+        activity_end = current_time + timedelta(minutes=venue_duration)
+        if activity_end <= end_datetime and (total_cost + venue_cost) <= budget:
+            activity_obj = {
+                "type": "venue",
+                "venue": venue_name,
+                "category": venue.get("category", "").lower(),
+                "start_time": current_time.isoformat(),
+                "end_time": activity_end.isoformat(),
+                "duration_minutes": venue_duration,
+                "cost": venue_cost,
+                "description": venue.get("description", ""),
+                "address": venue_address,
+                "phone": venue.get("phone"),
+                "url": venue.get("url")
+            }
+            scheduled.append(activity_obj)
+            scheduled_venue_names.add(venue_name)
+            current_time = activity_end
+            total_cost += venue_cost
+        
+        # Update remaining time and budget for next iteration
+        remaining_time = (end_datetime - current_time).total_seconds() / 60
+        remaining_budget = budget - total_cost
     
     return scheduled
 

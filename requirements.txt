@@ -7,4 +7,6 @@ fastapi
 uvicorn
 langgraph
 google-auth
+google-generativeai
+pytz
 

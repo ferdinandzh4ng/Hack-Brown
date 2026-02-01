@@ -203,19 +203,165 @@ CRITICAL REQUIREMENTS:
                     {"role": "system", "content": ACTIVITY_SCRAPER_PROMPT},
                     {"role": "user", "content": prompt},
                 ],
-                max_tokens=3000,  # Increased for more detailed responses
+                max_tokens=4000,  # Increased to reduce truncation issues
                 timeout=60  # Increased timeout for research
             )
             
             response_text = response.choices[0].message.content.strip()
+            finish_reason = response.choices[0].finish_reason
             
-            # Try to extract JSON from response (handle cases where AI adds extra text)
-            # Look for JSON object in the response
-            json_match = re.search(r'\{.*\}', response_text, re.DOTALL)
-            if json_match:
-                response_text = json_match.group(0)
+            # Check if response was truncated
+            if finish_reason == "length":
+                print(f"Warning: AI response was truncated (finish_reason=length). Attempting to parse partial JSON...")
             
-            scraped_data = json.loads(response_text)
+            # Remove markdown code blocks if present
+            if response_text.startswith("```"):
+                lines = response_text.split("\n")
+                if lines[0].startswith("```"):
+                    lines = lines[1:]
+                if lines and lines[-1].strip() == "```":
+                    lines = lines[:-1]
+                response_text = "\n".join(lines).strip()
+            
+            # Helper function to extract activities from partial/incomplete JSON
+            def extract_activities_from_text(text: str) -> List[Dict]:
+                """Extract activity objects from text, even if JSON is incomplete"""
+                activities = []
+                
+                # Try to find all complete activity objects using balanced braces
+                start_pos = 0
+                while True:
+                    # Find next opening brace
+                    start_idx = text.find("{", start_pos)
+                    if start_idx == -1:
+                        break
+                    
+                    # Find matching closing brace
+                    depth = 0
+                    in_string = False
+                    escape_next = False
+                    end_idx = -1
+                    
+                    for i in range(start_idx, len(text)):
+                        char = text[i]
+                        
+                        if escape_next:
+                            escape_next = False
+                            continue
+                        
+                        if char == '\\':
+                            escape_next = True
+                            continue
+                        
+                        if char == '"' and not escape_next:
+                            in_string = not in_string
+                            continue
+                        
+                        if not in_string:
+                            if char == '{':
+                                depth += 1
+                            elif char == '}':
+                                depth -= 1
+                                if depth == 0:
+                                    end_idx = i
+                                    break
+                    
+                    if end_idx > start_idx:
+                        # Found a complete object, try to parse it
+                        obj_text = text[start_idx:end_idx + 1]
+                        try:
+                            obj = json.loads(obj_text)
+                            # Check if it looks like an activity (has name, category, etc.)
+                            if isinstance(obj, dict) and ("name" in obj or "category" in obj or "estimated_cost" in obj):
+                                activities.append(obj)
+                        except:
+                            pass
+                        start_pos = end_idx + 1
+                    else:
+                        break
+                
+                return activities
+            
+            # Try to parse complete JSON first
+            scraped_data = None
+            try:
+                # Find balanced JSON object
+                start_idx = response_text.find("{")
+                if start_idx != -1:
+                    depth = 0
+                    in_string = False
+                    escape_next = False
+                    end_idx = -1
+                    
+                    for i in range(start_idx, len(response_text)):
+                        char = response_text[i]
+                        
+                        if escape_next:
+                            escape_next = False
+                            continue
+                        
+                        if char == '\\':
+                            escape_next = True
+                            continue
+                        
+                        if char == '"' and not escape_next:
+                            in_string = not in_string
+                            continue
+                        
+                        if not in_string:
+                            if char == '{':
+                                depth += 1
+                            elif char == '}':
+                                depth -= 1
+                                if depth == 0:
+                                    end_idx = i
+                                    break
+                    
+                    if end_idx > start_idx:
+                        json_text = response_text[start_idx:end_idx + 1]
+                        scraped_data = json.loads(json_text)
+            except json.JSONDecodeError:
+                pass
+            
+            # If complete JSON parsing failed, try to extract activities from partial JSON
+            if not scraped_data or not scraped_data.get("activities"):
+                print("Attempting to extract activities from partial/incomplete JSON...")
+                activities = extract_activities_from_text(response_text)
+                
+                if activities:
+                    # Calculate totals
+                    total_estimated = sum(a.get("estimated_cost", 0) for a in activities)
+                    scraped_data = {
+                        "activities": activities,
+                        "total_budget_analysis": {
+                            "total_available": budget,
+                            "total_estimated": total_estimated,
+                            "remaining_budget": max(0, budget - total_estimated),
+                            "budget_per_day": budget
+                        },
+                        "recommendations": ["Some activities recovered from truncated response."] if finish_reason == "length" else []
+                    }
+                else:
+                    # Last resort: try regex extraction
+                    activities_match = re.search(r'"activities"\s*:\s*(\[[^\]]*(?:\{[^\}]*\}[^\]]*)*\])', response_text, re.DOTALL)
+                    if activities_match:
+                        try:
+                            activities = json.loads(activities_match.group(1))
+                            total_estimated = sum(a.get("estimated_cost", 0) for a in activities)
+                            scraped_data = {
+                                "activities": activities,
+                                "total_budget_analysis": {
+                                    "total_available": budget,
+                                    "total_estimated": total_estimated,
+                                    "remaining_budget": max(0, budget - total_estimated),
+                                    "budget_per_day": budget
+                                },
+                                "recommendations": []
+                            }
+                        except:
+                            raise json.JSONDecodeError("Could not parse activities from response", response_text, 0)
+                    else:
+                        raise json.JSONDecodeError("No valid JSON or activities found", response_text, 0)
             
             # Validate that we got activities
             if not scraped_data.get("activities") or len(scraped_data.get("activities", [])) == 0:
@@ -464,11 +610,16 @@ async def handle_scraper_request(ctx: Context, sender: str, msg: ChatMessage):
                 try:
                     # Parse text to JSON (handles both JSON and natural language)
                     request_data = parse_text_to_json(item.text)
+                    # Limit interests to maximum of 3
+                    interest_activities = request_data.get("interest_activities", [])
+                    if len(interest_activities) > 3:
+                        interest_activities = interest_activities[:3]
+                        ctx.logger.info(f"Limited interests to first 3: {interest_activities}")
                     prefs = ActivityPreferences(
                         location=request_data.get("location", ""),
                         timeframe=request_data.get("timeframe", ""),
                         budget=float(request_data.get("budget", 0)),
-                        interest_activities=request_data.get("interest_activities", [])
+                        interest_activities=interest_activities
                     )
                 except (json.JSONDecodeError, ValueError, TypeError) as e:
                     error_response = {
@@ -545,17 +696,19 @@ async def handle_scraper_request(ctx: Context, sender: str, msg: ChatMessage):
                     ]
                 }
                 
-                ctx.logger.info(f"Sending response to {sender}")
+                response_text = json.dumps(response_json, indent=2)
+                ctx.logger.info(f"Sending response to {sender} ({len(response_text)} chars)")
+                ctx.logger.info(f"Response preview: {response_text[:200]}...")
                 
                 # Send response
-                await ctx.send(
-                    sender,
-                    ChatMessage(
-                        timestamp=datetime.utcnow(),
-                        msg_id=uuid4(),
-                        content=[TextContent(type="text", text=json.dumps(response_json, indent=2))],
-                    ),
+                response_message = ChatMessage(
+                    timestamp=datetime.utcnow(),
+                    msg_id=uuid4(),
+                    content=[TextContent(type="text", text=response_text)],
                 )
+                
+                await ctx.send(sender, response_message)
+                ctx.logger.info(f"Response sent successfully to {sender}")
                 
     except Exception as e:
         ctx.logger.error(f"Scraper error: {e}")

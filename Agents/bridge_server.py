@@ -27,6 +27,14 @@ from uagents_core.contrib.protocols.chat import (
     chat_protocol_spec,
 )
 
+# Import Gemini fallback
+try:
+    from gemini_fallback import generate_schedule_with_gemini
+    GEMINI_FALLBACK_AVAILABLE = True
+except ImportError:
+    GEMINI_FALLBACK_AVAILABLE = False
+    print("Warning: Gemini fallback not available. Install google-generativeai for fallback support.")
+
 load_dotenv()
 
 # Orchestrator agent address
@@ -154,6 +162,9 @@ async def process_send_queue(ctx: Context):
     bridge_state.agent_context = ctx  # Store context for use in send_to_orchestrator
     
     if bridge_state.send_queue is not None:
+        queue_size = bridge_state.send_queue.qsize()
+        if queue_size > 0:
+            ctx.logger.info(f"Send queue has {queue_size} message(s) - processing...")
         try:
             # Process messages in queue, but limit to prevent infinite loops
             processed = 0
@@ -181,8 +192,12 @@ async def process_send_queue(ctx: Context):
                     except Exception as e:
                         ctx.logger.warning(f"Error checking queued message age: {e}, sending message anyway")
                     
+                    ctx.logger.info(f"Attempting to send message to {target_address}")
+                    ctx.logger.info(f"Message ID: {message_to_send.msg_id}")
+                    ctx.logger.info(f"Message timestamp: {message_to_send.timestamp}")
+                    ctx.logger.info(f"Message content preview: {str(message_to_send.content)[:200]}")
                     await ctx.send(target_address, message_to_send)
-                    ctx.logger.info(f"Sent message to {target_address}")
+                    ctx.logger.info(f"✓ Successfully sent message to {target_address}")
                     processed += 1
                 except asyncio.QueueEmpty:
                     break
@@ -226,6 +241,111 @@ class ScheduleResponse(BaseModel):
     success: bool
     data: Optional[dict] = None
     error: Optional[str] = None
+
+def generate_simple_fallback_schedule(
+    location: str,
+    budget: float,
+    activities: list,
+    start_time: str,
+    end_time: str
+) -> dict:
+    """
+    Generate a simple fallback schedule when Gemini API is unavailable.
+    Creates a basic schedule structure without calling any external APIs.
+    """
+    from datetime import datetime, timedelta
+    
+    try:
+        # Parse times
+        start_dt = datetime.fromisoformat(start_time.replace('Z', '+00:00'))
+        end_dt = datetime.fromisoformat(end_time.replace('Z', '+00:00'))
+        duration_hours = (end_dt - start_dt).total_seconds() / 3600
+    except:
+        start_dt = datetime.now(timezone.utc)
+        end_dt = start_dt + timedelta(hours=8)
+        duration_hours = 8
+    
+    # Generate simple activities based on interests
+    activities_list = {}
+    current_time = start_dt
+    activity_num = 1
+    total_cost = 0.0
+    
+    # Activity templates based on interests
+    activity_templates = {
+        "sightseeing": [
+            {"name": "City Tour", "duration": 120, "cost": 30.0},
+            {"name": "Museum Visit", "duration": 90, "cost": 25.0},
+            {"name": "Historic Site", "duration": 60, "cost": 15.0},
+        ],
+        "dining": [
+            {"name": "Lunch", "duration": 60, "cost": 25.0},
+            {"name": "Dinner", "duration": 90, "cost": 50.0},
+            {"name": "Cafe Break", "duration": 30, "cost": 10.0},
+        ],
+        "entertainment": [
+            {"name": "Show/Event", "duration": 120, "cost": 75.0},
+            {"name": "Entertainment Venue", "duration": 90, "cost": 40.0},
+        ],
+    }
+    
+    # Generate activities
+    for activity_type in activities[:3]:  # Limit to 3 activity types
+        if activity_type in activity_templates:
+            template = activity_templates[activity_type][0]  # Use first template
+            
+            # Add transit if not first activity
+            if activity_num > 1:
+                transit_end = current_time + timedelta(minutes=30)
+                activities_list[f"Activity {activity_num}"] = {
+                    "venue": f"Transit to {template['name']}",
+                    "type": "transit",
+                    "category": "transit",
+                    "start_time": current_time.strftime("%Y-%m-%dT%H:%M:%S.000Z"),
+                    "end_time": transit_end.strftime("%Y-%m-%dT%H:%M:%S.000Z"),
+                    "duration_minutes": 30,
+                    "cost": 5.0,
+                    "description": f"Travel to {template['name']}",
+                    "address": location,
+                    "method": "transit"
+                }
+                total_cost += 5.0
+                activity_num += 1
+                current_time = transit_end
+            
+            # Add venue activity
+            activity_end = current_time + timedelta(minutes=template['duration'])
+            if total_cost + template['cost'] <= budget * 0.9:  # Use 90% of budget
+                activities_list[f"Activity {activity_num}"] = {
+                    "venue": template['name'],
+                    "type": "venue",
+                    "category": activity_type,
+                    "start_time": current_time.strftime("%Y-%m-%dT%H:%M:%S.000Z"),
+                    "end_time": activity_end.strftime("%Y-%m-%dT%H:%M:%S.000Z"),
+                    "duration_minutes": template['duration'],
+                    "cost": template['cost'],
+                    "description": f"{template['name']} in {location}",
+                    "address": location,
+                }
+                total_cost += template['cost']
+                activity_num += 1
+                current_time = activity_end
+    
+    return {
+        "location": location,
+        "budget": budget,
+        "interest_activities": activities,
+        "activities": activities_list,
+        "total_cost": round(total_cost, 2),
+        "remaining_budget": round(budget - total_cost, 2),
+        "summary": {
+            "total_activities": len(activities_list),
+            "total_cost": round(total_cost, 2),
+            "remaining_budget": round(budget - total_cost, 2)
+        },
+        "fallback": True,
+        "fallback_reason": "Gemini API quota exceeded"
+    }
 
 async def send_to_orchestrator(user_request: str, location: str, start_time: str, end_time: str) -> dict:
     """Send request to orchestrator and wait for response"""
@@ -290,21 +410,38 @@ async def send_to_orchestrator(user_request: str, location: str, start_time: str
         
         # Queue the message to be sent by the agent
         # The interval handler will pick it up and send it
+        print(f"Queueing message to send to orchestrator: {ORCHESTRATOR_AGENT_ADDRESS}")
+        print(f"Message ID: {message.msg_id}")
+        print(f"Queue size before put: {bridge_state.send_queue.qsize()}")
         await bridge_state.send_queue.put((ORCHESTRATOR_AGENT_ADDRESS, message))
+        print(f"✓ Message queued. Queue size after put: {bridge_state.send_queue.qsize()}")
         
         # Wait a bit for the interval handler to process and send
+        print(f"Waiting 1 second for interval handler to process message...")
         await asyncio.sleep(1)
+        print(f"Queue size after wait: {bridge_state.send_queue.qsize()}")
         
         # Wait for response (with timeout)
         # Clear any stale responses first
+        cleared_count = 0
         while not bridge_state.response_queue.empty():
             try:
                 bridge_state.response_queue.get_nowait()
+                cleared_count += 1
             except asyncio.QueueEmpty:
                 break
         
+        if cleared_count > 0:
+            print(f"Cleared {cleared_count} stale response(s) from queue")
+        
+        print(f"Waiting for response from orchestrator (timeout: 30s)...")
+        print(f"Queue size before wait: {bridge_state.response_queue.qsize()}")
+        
         try:
-            response_text = await asyncio.wait_for(bridge_state.response_queue.get(), timeout=120.0)
+            response_text = await asyncio.wait_for(bridge_state.response_queue.get(), timeout=30.0)
+            
+            print(f"✓ Received response from queue: {len(response_text)} chars")
+            print(f"Response preview: {response_text[:200]}...")
             
             # Clear request tracking after getting response
             bridge_state.last_request_time = None
@@ -313,16 +450,98 @@ async def send_to_orchestrator(user_request: str, location: str, start_time: str
             if response_text:
                 try:
                     response_data = json.loads(response_text)
+                    print(f"✓ Successfully parsed JSON response, returning to frontend")
                     return response_data
-                except json.JSONDecodeError:
+                except json.JSONDecodeError as e:
+                    print(f"✗ JSON parse error: {e}")
+                    print(f"Response text (first 500 chars): {response_text[:500]}")
                     return {"error": f"Invalid JSON response: {response_text[:200]}"}
             else:
+                print("✗ Empty response text")
                 return {"error": "No text content in response"}
         except asyncio.TimeoutError:
+            print(f"✗ Timeout waiting for response (30s elapsed)")
+            print(f"Queue size at timeout: {bridge_state.response_queue.qsize()}")
             # Clear request tracking on timeout
             bridge_state.last_request_time = None
             bridge_state.pending_request_id = None
-            return {"error": "Timeout waiting for response from orchestrator"}
+            
+            # Call Gemini fallback after timeout
+            print(f"Orchestrator timeout - calling Gemini fallback...")
+            if GEMINI_FALLBACK_AVAILABLE:
+                try:
+                    # Extract activities from user_request (simple keyword matching)
+                    activities = []
+                    user_lower = user_request.lower()
+                    if any(word in user_lower for word in ["eat", "dining", "food", "restaurant"]):
+                        activities.append("dining")
+                    if any(word in user_lower for word in ["sightsee", "sight", "tour", "visit", "see"]):
+                        activities.append("sightseeing")
+                    if any(word in user_lower for word in ["entertainment", "show", "movie", "concert", "theater"]):
+                        activities.append("entertainment")
+                    if any(word in user_lower for word in ["transit", "transport", "travel"]):
+                        activities.append("transit")
+                    
+                    # Default activities if none found
+                    if not activities:
+                        activities = ["sightseeing", "dining", "entertainment"]
+                    
+                    # Estimate budget from user request or use default
+                    budget = 500.0  # Default budget
+                    if "$" in user_request:
+                        import re
+                        budget_matches = re.findall(r'\$(\d+)', user_request)
+                        if budget_matches:
+                            budget = float(budget_matches[0])
+                    
+                    print(f"Calling Gemini fallback with: location={location}, budget={budget}, activities={activities}")
+                    gemini_result = generate_schedule_with_gemini(
+                        location=location,
+                        budget=budget,
+                        interest_activities=activities,
+                        start_time=start_time,
+                        end_time=end_time,
+                        user_request=user_request
+                    )
+                    
+                    if gemini_result and not gemini_result.get("error"):
+                        print(f"✓ Gemini fallback succeeded, returning schedule")
+                        return gemini_result
+                    else:
+                        gemini_error = gemini_result.get("error", "Unknown Gemini error") if gemini_result else "No response from Gemini"
+                        print(f"✗ Gemini fallback failed: {gemini_error}")
+                        
+                        # Check if it's a quota error (429)
+                        is_quota_error = "429" in str(gemini_error) or "quota" in str(gemini_error).lower() or "rate limit" in str(gemini_error).lower()
+                        
+                        if is_quota_error:
+                            print(f"Gemini quota exceeded - generating simple fallback schedule")
+                            # Generate a simple fallback schedule without API
+                            return generate_simple_fallback_schedule(
+                                location=location,
+                                budget=budget,
+                                activities=activities,
+                                start_time=start_time,
+                                end_time=end_time
+                            )
+                        else:
+                            return {
+                                "error": f"Orchestrator timeout and Gemini fallback failed: {gemini_error}",
+                                "fallback_attempted": True
+                            }
+                except Exception as gemini_err:
+                    print(f"✗ Exception in Gemini fallback: {gemini_err}")
+                    import traceback
+                    traceback.print_exc()
+                    return {
+                        "error": f"Orchestrator timeout and Gemini fallback error: {str(gemini_err)}",
+                        "fallback_attempted": True
+                    }
+            else:
+                return {
+                    "error": "Timeout waiting for response from orchestrator (30s). Gemini fallback not available.",
+                    "fallback_attempted": False
+                }
                 
     except Exception as e:
         import traceback

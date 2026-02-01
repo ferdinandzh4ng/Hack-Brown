@@ -463,7 +463,10 @@ async def handle_allocation_request(ctx: Context, sender: str, msg: ChatMessage)
                 )
                 
                 # Convert to JSON-serializable format - activity, cost, and leftover budget
+                # Include location and budget for budget filter agent compatibility
                 response_json = {
+                    "location": allocation_request.location,
+                    "budget": allocation_request.budget,
                     "activities": [
                         {
                             "activity": a.activity,
@@ -474,17 +477,19 @@ async def handle_allocation_request(ctx: Context, sender: str, msg: ChatMessage)
                     "leftover_budget": response.remaining_budget
                 }
                 
-                ctx.logger.info(f"Sending response to {sender}")
+                response_text = json.dumps(response_json, indent=2)
+                ctx.logger.info(f"Sending response to {sender} ({len(response_text)} chars)")
+                ctx.logger.info(f"Response preview: {response_text[:200]}...")
                 
                 # Send response
-                await ctx.send(
-                    sender,
-                    ChatMessage(
-                        timestamp=datetime.utcnow(),
-                        msg_id=uuid4(),
-                        content=[TextContent(type="text", text=json.dumps(response_json, indent=2))],
-                    ),
+                response_message = ChatMessage(
+                    timestamp=datetime.utcnow(),
+                    msg_id=uuid4(),
+                    content=[TextContent(type="text", text=response_text)],
                 )
+                
+                await ctx.send(sender, response_message)
+                ctx.logger.info(f"Response sent successfully to {sender}")
                 
     except Exception as e:
         ctx.logger.error(f"Fund Allocation error: {e}")

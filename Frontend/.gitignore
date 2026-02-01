@@ -14,6 +14,8 @@ out/
 build
 dist
 
+/Agents/gemini_fallback.py
+
 # Misc
 .DS_Store
 *.pem

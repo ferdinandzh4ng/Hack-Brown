@@ -249,10 +249,14 @@ async def safe_send(ctx: Context, destination: str, message: ChatMessage, max_re
 async def handle_message(ctx: Context, sender: str, msg: ChatMessage):
     ctx.logger.info(f"Got a message from {sender}: {msg.content}")
     ctx.logger.info(f"Current session: {ctx.session}")
+    ctx.logger.info(f"Intent dispatcher agent address: {ctx.agent.address}")
     # Store sender with session AND also store it separately to ensure we can retrieve it
     ctx.storage.set(str(ctx.session), sender)
     # Also store with a more persistent key in case session changes
     ctx.storage.set(f"last_sender_{ctx.session}", sender)
+    # Store with a timestamp to help debug stale responses
+    import time
+    ctx.storage.set(f"sender_timestamp_{ctx.session}", time.time())
     
     # NOTE: Not sending ChatAcknowledgement to avoid interfering with ctx.send_and_receive
     # The orchestrator uses send_and_receive which can match acknowledgements instead of actual responses
@@ -345,6 +349,8 @@ async def handle_structured_output_response(
     
     # Try to get session sender - try multiple keys in case session changed
     session_sender = ctx.storage.get(str(ctx.session))
+    ctx.logger.info(f'Looking for session sender for session {ctx.session}')
+    ctx.logger.info(f'Primary key lookup result: {session_sender}')
     if session_sender is None:
         # Try the alternative key
         session_sender = ctx.storage.get(f"last_sender_{ctx.session}")
@@ -386,6 +392,9 @@ async def handle_structured_output_response(
             ctx.logger.error(f'Error in fallback sender lookup: {e}')
     
     if session_sender is None:
+        ctx.logger.error(
+            f"CRITICAL: Cannot find session sender for session {ctx.session}. Cannot send response."
+        )
         ctx.logger.error(
             "Discarding message because no session sender found in storage"
         )
@@ -596,18 +605,21 @@ async def handle_structured_output_response(
             ctx.logger.info(f'Sending dispatch plan to session_sender: {session_sender}')
             ctx.logger.info(f'Dispatch plan length: {len(dispatch_plan_json)} chars')
             ctx.logger.info(f'Intent dispatcher agent address: {ctx.agent.address}')
+            ctx.logger.info(f'Response preview: {dispatch_plan_json[:200]}...')
             
             # Try sending directly first, then fall back to safe_send
             response_message = create_text_chat(dispatch_plan_json, end_session=True)
             try:
                 ctx.logger.info(f'Attempting direct send to {session_sender}...')
                 await ctx.send(session_sender, response_message)
-                ctx.logger.info(f'Direct send successful to {session_sender}')
+                ctx.logger.info(f'✓ Direct send successful to {session_sender}')
             except Exception as direct_error:
                 ctx.logger.warning(f'Direct send failed: {direct_error}, trying safe_send...')
                 send_result = await safe_send(ctx, session_sender, response_message)
                 if not send_result:
                     ctx.logger.error(f'Both direct send and safe_send failed for {session_sender}')
+                else:
+                    ctx.logger.info(f'✓ Safe send successful to {session_sender}')
             
     except Exception as err:
         ctx.logger.error(f"Error processing structured output: {err}")
