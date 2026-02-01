@@ -703,10 +703,17 @@ export default function HelpingHandApp() {
   }, [chatInput, location, startTime, endTime, transformBackendResponse]);
 
   const handleAuthorize = useCallback((id: string) => {
-    setSelectedIds((prev) =>
-      prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id],
-    );
-  }, []);
+    setSelectedIds((prev) => {
+      // Impromptu: single selection only — new selection replaces previous
+      if (displayMode === "single") {
+        return prev.includes(id) ? [] : [id];
+      }
+      // Itinerary: toggle multi-select
+      return prev.includes(id)
+        ? prev.filter((x) => x !== id)
+        : [...prev, id];
+    });
+  }, [displayMode]);
 
   const handleAuthorizeFullItinerary = useCallback(() => {
     const ids = activeGroupItems.map((r) => r.id);
