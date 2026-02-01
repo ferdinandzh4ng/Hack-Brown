@@ -22,26 +22,26 @@
     "selected_activities": [
       {
         "activity": "Visit the Statue of Liberty",
-        "cost": 150.0
+        "cost": 75.0
       },
       {
         "activity": "Broadway show",
-        "cost": 150.0
+        "cost": 75.0
       },
       {
         "activity": "Times Square sightseeing",
-        "cost": 150.0
+        "cost": 75.0
       }
     ],
     "transit_cost": 50.0,
-    "total_estimated_cost": 500.0,
-    "remaining_budget": 0.0
+    "total_estimated_cost": 275.0,
+    "remaining_budget": 225.0
   },
   "summary": {
     "total_input_activities": 5,
     "matched_to_interests": 3,
     "selected_within_budget": 3,
-    "total_cost": 500.0,
-    "remaining_budget": 0.0
+    "total_cost": 275.0,
+    "remaining_budget": 225.0
   }
 }

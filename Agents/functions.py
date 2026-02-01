@@ -787,7 +787,7 @@ def finalize_activity_list(original_request: str, user_preferences: str, locatio
         print(traceback.format_exc())
         return None
 
-def dispatch_intent(user_request: str, sender: str, conversation_state: Optional[Dict] = None) -> Dict:
+def dispatch_intent(user_request: str, sender: str, conversation_state: Optional[Dict] = None, json_start_time: Optional[str] = None, json_end_time: Optional[str] = None) -> Dict:
     """
     Main intent dispatch function that processes user requests.
     
@@ -865,10 +865,11 @@ def dispatch_intent(user_request: str, sender: str, conversation_state: Optional
         ]
         user_request_lower = user_request.lower()
         has_activities = any(keyword in user_request_lower for keyword in activity_keywords)
+        detected_activities = [kw for kw in activity_keywords if kw in user_request_lower]
         
         # If activities are specified, skip vagueness check entirely - request is NOT vague
         if has_activities:
-            print(f"Request has activities specified ({[kw for kw in activity_keywords if kw in user_request_lower]}), skipping vagueness check - NOT vague")
+            print(f"Request has activities specified ({detected_activities}), skipping vagueness check - NOT vague")
             is_vague = False
             # Still try to extract location for use later
             import re
@@ -879,6 +880,8 @@ def dispatch_intent(user_request: str, sender: str, conversation_state: Optional
                 location_match = re.search(r'\(Location:\s*([^)]+)\)', user_request, re.IGNORECASE)
                 location = location_match.group(1).strip() if location_match else None
         else:
+            print(f"WARNING: No activities detected in user_request: '{user_request[:100]}...'")
+            print(f"Activity keywords checked: {activity_keywords[:10]}...")
             # No activities detected, check with AI vagueness check
             vagueness_result = check_vagueness(user_request)
             print(f"Vagueness check result: {vagueness_result}")  # Debug logging
@@ -913,8 +916,44 @@ def dispatch_intent(user_request: str, sender: str, conversation_state: Optional
                 # Fall through to normal dispatch below
             else:
                 # STEP 2a: Extract basic info (budget, times) from the vague request
+                # Use JSON times if provided, otherwise extract from text
                 try:
-                    budget_extract_prompt = f"""Extract the budget amount, start_time, and end_time from this user request. Look for dollar amounts, numbers with $, or phrases like "spend around X$", "budget of X", "X dollars".
+                    # If JSON times were provided, use them directly
+                    if json_start_time or json_end_time:
+                        # Still extract budget from text, but use JSON times
+                        budget_extract_prompt = f"""Extract the budget amount from this user request. Look for dollar amounts, numbers with $, or phrases like "spend around X$", "budget of X", "X dollars".
+
+User request: {user_request}
+
+Return ONLY valid JSON:
+{{
+  "budget": number or null
+}}
+
+Examples:
+- "spend around 400$" -> {{"budget": 400}}
+- "budget of 500" -> {{"budget": 500}}
+- "spend 300 dollars" -> {{"budget": 300}}
+- "I have 200$" -> {{"budget": 200}}
+"""
+                        budget_parse = client.chat.completions.create(
+                            model="asi1-mini",
+                            messages=[
+                                {"role": "system", "content": "You are a data extraction assistant. Extract budget from user requests."},
+                                {"role": "user", "content": budget_extract_prompt},
+                            ],
+                            max_tokens=100,
+                        )
+                        budget_info = safe_json_parse(budget_parse.choices[0].message.content)
+                        basic_info = {
+                            "budget": budget_info.get("budget"),
+                            "start_time": json_start_time,
+                            "end_time": json_end_time
+                        }
+                        print(f"Extracted basic info (using JSON times): {basic_info}")
+                    else:
+                        # No JSON times, extract everything from text
+                        budget_extract_prompt = f"""Extract the budget amount, start_time, and end_time from this user request. Look for dollar amounts, numbers with $, or phrases like "spend around X$", "budget of X", "X dollars".
 
 User request: {user_request}
 
@@ -931,19 +970,23 @@ Examples:
 - "spend 300 dollars" -> {{"budget": 300, "start_time": null, "end_time": null}}
 - "I have 200$" -> {{"budget": 200, "start_time": null, "end_time": null}}
 """
-                    initial_parse = client.chat.completions.create(
-                        model="asi1-mini",
-                        messages=[
-                            {"role": "system", "content": "You are a data extraction assistant. Extract budget, start_time, and end_time from user requests."},
-                            {"role": "user", "content": budget_extract_prompt},
-                        ],
-                        max_tokens=200,
-                    )
-                    basic_info = safe_json_parse(initial_parse.choices[0].message.content)
-                    print(f"Extracted basic info: {basic_info}")
+                        initial_parse = client.chat.completions.create(
+                            model="asi1-mini",
+                            messages=[
+                                {"role": "system", "content": "You are a data extraction assistant. Extract budget, start_time, and end_time from user requests."},
+                                {"role": "user", "content": budget_extract_prompt},
+                            ],
+                            max_tokens=200,
+                        )
+                        basic_info = safe_json_parse(initial_parse.choices[0].message.content)
+                        print(f"Extracted basic info: {basic_info}")
                 except Exception as e:
                     print(f"Error extracting basic info: {e}")
-                    basic_info = {"budget": None, "start_time": None, "end_time": None}
+                    basic_info = {
+                        "budget": None, 
+                        "start_time": json_start_time, 
+                        "end_time": json_end_time
+                    }
                 
                 # STEP 2b: Check user's transaction history to infer preferences
                 user_transactions = get_user_transactions(sender)

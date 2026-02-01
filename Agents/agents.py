@@ -416,19 +416,42 @@ async def handle_structured_output_response(
         # Determine budget to use: prioritize JSON budget, then structured output budget
         budget_to_use = json_budget if json_budget is not None else structured_budget
         
+        # Get original message to preserve activities that might be lost in structured output
+        original_message_key = f"original_message_{ctx.session}"
+        original_user_request = ctx.storage.get(original_message_key)
+        
+        # If structured output user_request is shorter/missing details, use original
+        # This preserves activities like "eat, sightsee and get some entertainment"
+        if original_user_request and len(original_user_request) > len(user_request):
+            # Original has more detail, use it as base but keep any extracted data
+            ctx.logger.info(f'Using original user_request to preserve activities: {original_user_request[:100]}...')
+            user_request = original_user_request
+        
         # Always use location from JSON input if available (prioritize JSON location)
         if json_location:
-            # Always add location from JSON to user_request
-            user_request = f"{user_request} (Location: {json_location})"
+            # Only add location if it's not already in the request
+            if f"(Location: {json_location})" not in user_request and f"Location: {json_location}" not in user_request:
+                user_request = f"{user_request} (Location: {json_location})"
             ctx.logger.info(f'Using location from JSON input: {json_location}')
         
         # Add budget to user_request if available (from JSON or structured output)
         if budget_to_use is not None:
-            user_request = f"{user_request} (Budget: ${budget_to_use})"
+            # Only add budget if it's not already in the request
+            if f"(Budget: ${budget_to_use})" not in user_request and f"Budget: ${budget_to_use}" not in user_request:
+                user_request = f"{user_request} (Budget: ${budget_to_use})"
             ctx.logger.info(f'Using budget: ${budget_to_use} (source: {"JSON" if json_budget is not None else "structured output"})')
+        
+        # Log the final user_request to help debug activity detection
+        ctx.logger.info(f'Final user_request for dispatch_intent (length: {len(user_request)}): {user_request[:300]}...')
         
         # Store budget for later use in dispatch plan
         ctx.storage.set(f"extracted_budget_{ctx.session}", budget_to_use)
+        
+        # Store times for dispatch_intent to use (it will check session storage)
+        if start_time_to_use:
+            ctx.storage.set(f"json_start_time_for_dispatch_{ctx.session}", start_time_to_use)
+        if end_time_to_use:
+            ctx.storage.set(f"json_end_time_for_dispatch_{ctx.session}", end_time_to_use)
         
         # If times were available and not in structured output, add them to user_request
         if (start_time_to_use or end_time_to_use) and not intent_data.get("start_time") and not intent_data.get("end_time"):
@@ -438,62 +461,69 @@ async def handle_structured_output_response(
                 user_request = f"{user_request} (Time: {start_time_to_use} to {end_time_to_use})"
             elif start_time_to_use:
                 user_request = f"{user_request} (Start time: {start_time_to_use})"
+        
+        ctx.logger.info(f'Processing intent request: {user_request}')
+        
+        # Get conversation state
+        conversation_state_key = f"conversation_state_{session_sender}"
+        conversation_state = ctx.storage.get(conversation_state_key)
+        
+        # Process intent dispatch (always call this, not just when times are available)
+        # Pass session context and times so dispatch_intent can use them
+        result = dispatch_intent(
+            user_request, 
+            session_sender, 
+            conversation_state,
+            json_start_time=start_time_to_use,
+            json_end_time=end_time_to_use
+        )
+        
+        # Check if result is None or invalid
+        if result is None:
+            ctx.logger.error("dispatch_intent returned None, sending error response")
+            error_msg = create_text_chat("Sorry, I encountered an error processing your request. Please try again.")
+            await safe_send(ctx, session_sender, error_msg)
+            return
+        
+        if not isinstance(result, dict) or "type" not in result:
+            ctx.logger.error(f"dispatch_intent returned invalid result: {result}")
+            error_msg = create_text_chat("Sorry, I encountered an error processing your request. Please try again.")
+            await safe_send(ctx, session_sender, error_msg)
+            return
+        
+        # Update dispatch plan with JSON values (location, start_time, end_time, budget)
+        if result.get("type") == "dispatch_plan":
+            dispatch_data = result.get("data", {})
+            constraints = dispatch_data.get("constraints", {})
             
-            ctx.logger.info(f'Processing intent request: {user_request}')
+            # Always use JSON location if available (prioritize over dispatch plan location)
+            if json_location:
+                constraints["location"] = json_location
+                ctx.logger.info(f'Using location from JSON input in dispatch plan: {json_location}')
             
-            # Get conversation state
-            conversation_state_key = f"conversation_state_{session_sender}"
-            conversation_state = ctx.storage.get(conversation_state_key)
+            # Add times if available and not already in constraints
+            if start_time_to_use and not constraints.get("start_time"):
+                constraints["start_time"] = start_time_to_use
+                ctx.logger.info(f'Added start_time to dispatch plan: {start_time_to_use}')
             
-            # Process intent dispatch
-            result = dispatch_intent(user_request, session_sender, conversation_state)
+            if end_time_to_use and not constraints.get("end_time"):
+                constraints["end_time"] = end_time_to_use
+                ctx.logger.info(f'Added end_time to dispatch plan: {end_time_to_use}')
             
-            # Check if result is None or invalid
-            if result is None:
-                ctx.logger.error("dispatch_intent returned None, sending error response")
-                error_msg = create_text_chat("Sorry, I encountered an error processing your request. Please try again.")
-                await safe_send(ctx, session_sender, error_msg)
-                return
+            # Add budget if available and not already in constraints (from JSON, structured output, or extracted)
+            extracted_budget = ctx.storage.get(f"extracted_budget_{ctx.session}")
+            budget_to_add = json_budget if json_budget is not None else extracted_budget
             
-            if not isinstance(result, dict) or "type" not in result:
-                ctx.logger.error(f"dispatch_intent returned invalid result: {result}")
-                error_msg = create_text_chat("Sorry, I encountered an error processing your request. Please try again.")
-                await safe_send(ctx, session_sender, error_msg)
-                return
+            if budget_to_add is not None and not constraints.get("budget"):
+                constraints["budget"] = float(budget_to_add)
+                ctx.logger.info(f'Added budget to dispatch plan: ${budget_to_add} (source: {"JSON" if json_budget is not None else "structured output/extracted"})')
+            elif constraints.get("budget"):
+                ctx.logger.info(f'Budget already in dispatch plan: ${constraints.get("budget")}')
+            else:
+                ctx.logger.warning(f'No budget found - json_budget={json_budget}, extracted_budget={extracted_budget}, constraints.budget={constraints.get("budget")}')
             
-            # Update dispatch plan with JSON values (location, start_time, end_time, budget)
-            if result.get("type") == "dispatch_plan":
-                dispatch_data = result.get("data", {})
-                constraints = dispatch_data.get("constraints", {})
-                
-                # Always use JSON location if available (prioritize over dispatch plan location)
-                if json_location:
-                    constraints["location"] = json_location
-                    ctx.logger.info(f'Using location from JSON input in dispatch plan: {json_location}')
-                
-                # Add times if available and not already in constraints
-                if start_time_to_use and not constraints.get("start_time"):
-                    constraints["start_time"] = start_time_to_use
-                    ctx.logger.info(f'Added start_time to dispatch plan: {start_time_to_use}')
-                
-                if end_time_to_use and not constraints.get("end_time"):
-                    constraints["end_time"] = end_time_to_use
-                    ctx.logger.info(f'Added end_time to dispatch plan: {end_time_to_use}')
-                
-                # Add budget if available and not already in constraints (from JSON, structured output, or extracted)
-                extracted_budget = ctx.storage.get(f"extracted_budget_{ctx.session}")
-                budget_to_add = json_budget if json_budget is not None else extracted_budget
-                
-                if budget_to_add is not None and not constraints.get("budget"):
-                    constraints["budget"] = float(budget_to_add)
-                    ctx.logger.info(f'Added budget to dispatch plan: ${budget_to_add} (source: {"JSON" if json_budget is not None else "structured output/extracted"})')
-                elif constraints.get("budget"):
-                    ctx.logger.info(f'Budget already in dispatch plan: ${constraints.get("budget")}')
-                else:
-                    ctx.logger.warning(f'No budget found - json_budget={json_budget}, extracted_budget={extracted_budget}, constraints.budget={constraints.get("budget")}')
-                
-                dispatch_data["constraints"] = constraints
-                result["data"] = dispatch_data
+            dispatch_data["constraints"] = constraints
+            result["data"] = dispatch_data
         
         if result.get("type") == "error":
             error_msg = json.dumps(result["data"], indent=2)

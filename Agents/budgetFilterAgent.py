@@ -76,8 +76,18 @@ import json
 import os
 from typing import List, Dict, Optional
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 from uuid import uuid4
+from dotenv import load_dotenv
+from openai import OpenAI
+
+load_dotenv()
+
+# AI Client for transit research and scheduling
+client = OpenAI(
+    base_url="https://api.asi1.ai/v1",
+    api_key=os.getenv("FETCH_API_KEY", ""),
+)
 
 try:
     from uagents import Agent, Context, Protocol, Model
@@ -381,83 +391,466 @@ def main():
     print(json.dumps(output, indent=2))
 
 
+def parse_duration(duration_str: str) -> int:
+    """Parse duration string (e.g., '2 hours', '30 minutes') to minutes"""
+    if not duration_str:
+        return 60  # Default 1 hour
+    
+    duration_str = duration_str.lower()
+    minutes = 0
+    
+    # Extract hours
+    hour_match = re.search(r'(\d+)\s*h(?:our)?s?', duration_str)
+    if hour_match:
+        minutes += int(hour_match.group(1)) * 60
+    
+    # Extract minutes
+    min_match = re.search(r'(\d+)\s*m(?:inute)?s?', duration_str)
+    if min_match:
+        minutes += int(min_match.group(1))
+    
+    # Extract "half day" or "full day"
+    if 'half day' in duration_str:
+        minutes = 240  # 4 hours
+    elif 'full day' in duration_str:
+        minutes = 480  # 8 hours
+    
+    return minutes if minutes > 0 else 60  # Default to 1 hour
+
+
+def research_transit(from_address: str, to_address: str, location: str) -> Dict:
+    """Research best transit method between two addresses using AI"""
+    try:
+        prompt = f"""Research the best transportation method between these two locations in {location}:
+
+From: {from_address}
+To: {to_address}
+
+Return ONLY valid JSON:
+{{
+  "method": "walking|driving|public_transit|taxi|rideshare",
+  "duration_minutes": number,
+  "cost_usd": number,
+  "description": "brief description of the route"
+}}
+
+Consider:
+- Walking if under 1 mile (15-20 min walk)
+- Public transit (bus, subway, train) if available and efficient
+- Driving/taxi/rideshare for longer distances or when public transit is inconvenient
+- Cost should be realistic for the location and method"""
+        
+        response = client.chat.completions.create(
+            model="asi1-mini",
+            messages=[
+                {"role": "system", "content": "You are a transportation research assistant. Research the best transit methods between locations."},
+                {"role": "user", "content": prompt},
+            ],
+            max_tokens=200,
+        )
+        
+        result = json.loads(response.choices[0].message.content)
+        return result
+    except Exception as e:
+        print(f"Error researching transit: {e}")
+        # Fallback: estimate based on distance
+        return {
+            "method": "walking",
+            "duration_minutes": 15,
+            "cost_usd": 0.0,
+            "description": "Estimated walking route"
+        }
+
+
+def schedule_activities(venues: List[Dict], all_available_venues: Dict[str, List[Dict]], location: str, budget: float, total_cost: float, start_time: Optional[str] = None, end_time: Optional[str] = None) -> List[Dict]:
+    """Schedule activities with timing, transit, and add more if time permits"""
+    if not venues:
+        return []
+    
+    # Parse start and end times
+    if start_time:
+        try:
+            current_time = datetime.fromisoformat(start_time.replace('Z', '+00:00'))
+        except:
+            current_time = datetime.now().replace(hour=9, minute=0, second=0, microsecond=0)
+    else:
+        current_time = datetime.now().replace(hour=9, minute=0, second=0, microsecond=0)
+    
+    if end_time:
+        try:
+            end_datetime = datetime.fromisoformat(end_time.replace('Z', '+00:00'))
+        except:
+            end_datetime = current_time + timedelta(hours=12)  # Default 12 hours
+    else:
+        end_datetime = current_time + timedelta(hours=12)
+    
+    scheduled = []
+    last_category = None
+    scheduled_categories = set()
+    meal_count = 0
+    
+    # Sort venues: meals first (breakfast, lunch, dinner), then other activities
+    meal_order = {"breakfast": 1, "brunch": 1, "lunch": 2, "dinner": 3, "eat": 2}
+    sorted_venues = sorted(venues, key=lambda v: (
+        meal_order.get(v.get("category", ""), 99),
+        v.get("name", "")
+    ))
+    
+    for i, venue in enumerate(sorted_venues):
+        venue_name = venue.get("name", "")
+        venue_category = venue.get("category", "").lower()
+        venue_cost = venue.get("cost", 0)
+        venue_address = venue.get("address", "")
+        duration_str = venue.get("duration", "1 hour")
+        duration_minutes = parse_duration(duration_str)
+        
+        # Add transit from previous venue if not first
+        if i > 0 and scheduled:
+            prev_venue = scheduled[-1]
+            prev_address = prev_venue.get("address", "")
+            
+            if prev_address and venue_address:
+                transit_info = research_transit(prev_address, venue_address, location)
+                transit_duration = transit_info.get("duration_minutes", 15)
+                transit_cost = transit_info.get("cost_usd", 0.0)
+                transit_method = transit_info.get("method", "walking")
+                
+                # Add transit as an activity
+                transit_activity = {
+                    "type": "transit",
+                    "venue": f"Travel via {transit_method}",
+                    "category": "transit",
+                    "start_time": current_time.isoformat(),
+                    "end_time": (current_time + timedelta(minutes=transit_duration)).isoformat(),
+                    "duration_minutes": transit_duration,
+                    "cost": transit_cost,
+                    "description": transit_info.get("description", f"Travel from {prev_venue.get('venue', 'previous location')} to {venue_name}"),
+                    "method": transit_method,
+                    "address": venue_address  # Destination address
+                }
+                scheduled.append(transit_activity)
+                current_time += timedelta(minutes=transit_duration)
+                total_cost += transit_cost
+        
+        # Check if we have time for this activity
+        activity_end = current_time + timedelta(minutes=duration_minutes)
+        if activity_end > end_datetime:
+            break  # No more time
+        
+        # Skip if same category as last (especially for meals)
+        if last_category == venue_category and venue_category in ["eat", "dining", "food"]:
+            continue
+        
+        # Add the activity
+        activity = {
+            "type": "venue",
+            "venue": venue_name,
+            "category": venue_category,
+            "start_time": current_time.isoformat(),
+            "end_time": activity_end.isoformat(),
+            "duration_minutes": duration_minutes,
+            "cost": venue_cost,
+            "description": venue.get("description", ""),
+            "address": venue_address,
+            "phone": venue.get("phone"),
+            "url": venue.get("url")
+        }
+        scheduled.append(activity)
+        current_time = activity_end
+        total_cost += venue_cost
+        last_category = venue_category
+        scheduled_categories.add(venue_category)
+        if venue_category in ["eat", "dining", "food"]:
+            meal_count += 1
+    
+    # If there's still time and budget, try to add more activities
+    remaining_time = (end_datetime - current_time).total_seconds() / 60  # minutes
+    remaining_budget = budget - total_cost
+    
+    if remaining_time > 60 and remaining_budget > 20:  # More than 1 hour and $20 left
+        # Look for additional entertainment or sightseeing activities
+        # Prioritize entertainment (can have multiple) and sightseeing
+        additional_categories = ["entertainment", "sightsee", "sightseeing", "cultural", "shop"]
+        
+        for category in additional_categories:
+            if remaining_time <= 30:  # Less than 30 min left
+                break
+            
+            # Get available venues for this category
+            available_for_category = []
+            for cat, venue_list in all_available_venues.items():
+                if match_venue_to_category(cat, category):
+                    available_for_category.extend(venue_list)
+            
+            # Find a venue that fits time and budget
+            for venue in available_for_category:
+                # Skip if already scheduled
+                if any(v.get("venue") == venue.get("name") for v in scheduled if v.get("type") == "venue"):
+                    continue
+                
+                venue_name = venue.get("name", "")
+                venue_cost = venue.get("cost", 0)
+                venue_address = venue.get("address", "")
+                duration_str = venue.get("duration", "1 hour")
+                duration_minutes = parse_duration(duration_str)
+                
+                # Check if it fits time and budget
+                if venue_cost <= remaining_budget and duration_minutes <= remaining_time:
+                    # Add transit if needed
+                    if scheduled:
+                        prev_venue = scheduled[-1]
+                        prev_address = prev_venue.get("address", "")
+                        
+                        if prev_address and venue_address:
+                            transit_info = research_transit(prev_address, venue_address, location)
+                            transit_duration = transit_info.get("duration_minutes", 15)
+                            transit_cost = transit_info.get("cost_usd", 0.0)
+                            transit_method = transit_info.get("method", "walking")
+                            
+                            if (current_time + timedelta(minutes=transit_duration + duration_minutes)) <= end_datetime and (total_cost + transit_cost + venue_cost) <= budget:
+                                # Add transit
+                                transit_activity = {
+                                    "type": "transit",
+                                    "venue": f"Travel via {transit_method}",
+                                    "category": "transit",
+                                    "start_time": current_time.isoformat(),
+                                    "end_time": (current_time + timedelta(minutes=transit_duration)).isoformat(),
+                                    "duration_minutes": transit_duration,
+                                    "cost": transit_cost,
+                                    "description": transit_info.get("description", f"Travel to {venue_name}"),
+                                    "method": transit_method,
+                                    "address": venue_address
+                                }
+                                scheduled.append(transit_activity)
+                                current_time += timedelta(minutes=transit_duration)
+                                total_cost += transit_cost
+                    
+                    # Add the activity
+                    activity_end = current_time + timedelta(minutes=duration_minutes)
+                    if activity_end <= end_datetime:
+                        activity = {
+                            "type": "venue",
+                            "venue": venue_name,
+                            "category": venue.get("category", "").lower(),
+                            "start_time": current_time.isoformat(),
+                            "end_time": activity_end.isoformat(),
+                            "duration_minutes": duration_minutes,
+                            "cost": venue_cost,
+                            "description": venue.get("description", ""),
+                            "address": venue_address,
+                            "phone": venue.get("phone"),
+                            "url": venue.get("url")
+                        }
+                        scheduled.append(activity)
+                        current_time = activity_end
+                        total_cost += venue_cost
+                        remaining_time = (end_datetime - current_time).total_seconds() / 60
+                        remaining_budget = budget - total_cost
+                        break  # Added one, move to next category
+    
+    return scheduled
+
+
+def match_venue_to_category(venue_category: str, interest_category: str) -> bool:
+    """Check if a venue category matches an interest category"""
+    venue_cat_lower = venue_category.lower()
+    interest_cat_lower = interest_category.lower()
+    
+    # Direct match
+    if venue_cat_lower == interest_cat_lower:
+        return True
+    
+    # Keyword matching
+    category_keywords = {
+        "eat": ["dining", "food", "restaurant", "meal", "cafe"],
+        "sightsee": ["sightseeing", "sights", "landmark", "monument", "museum", "attraction"],
+        "entertainment": ["entertainment", "show", "concert", "theater", "nightlife", "bar", "club"],
+        "shop": ["shopping", "shop", "mall", "market", "boutique"],
+        "adventure": ["adventure", "outdoor", "hiking", "sports"],
+        "cultural": ["cultural", "art", "gallery", "history", "museum"]
+    }
+    
+    # Check if venue category matches any keywords for the interest
+    keywords = category_keywords.get(interest_cat_lower, [])
+    return any(kw in venue_cat_lower for kw in keywords) or any(kw in venue_cat_lower for kw in [interest_cat_lower])
+
+
 def filter_from_dicts(events: Dict, fund: Dict) -> Dict:
     """
     Run the filtering pipeline given parsed JSON dicts and return output dict.
+    Matches specific venues from EventsScraperAgent to budget categories from FundAllocationAgent.
     
     Args:
-        events: EventScraperAgent output (contains interest_activities, location, budget, timeframe)
-        fund: FundAllocationAgent output (contains activities list, location, budget)
+        events: EventScraperAgent output (contains activities list with name/category/cost, interest_activities, location, budget)
+        fund: FundAllocationAgent output (contains activities list with activity/cost, location, budget, leftover_budget)
     
     Returns:
-        Dictionary with filtered activities that match interests and fit budget.
+        Dictionary with specific venues that match interests and fit budget.
     """
     location = fund.get("location") or events.get("location") or ""
-    budget = float(fund.get("budget", events.get("budget", 0)))
+    budget = float(fund.get("budget") or events.get("budget") or 0)
 
     interest_activities = events.get("interest_activities", [])
-    fund_activities = fund.get("activities", [])
+    
+    # Extract venues from EventsScraperAgent output
+    # EventsScraperAgent returns: {"activities": [{"name": "Venue Name", "category": "eat", "estimated_cost": 45.0, ...}, ...]}
+    events_activities_list = events.get("activities", [])
+    venues_by_category = {}  # Map category -> list of venues
+    
+    for venue in events_activities_list:
+        if isinstance(venue, dict):
+            venue_category = venue.get("category", "").lower()
+            venue_name = venue.get("name", "")
+            venue_cost = float(venue.get("estimated_cost", 0))
+            
+            if venue_name and venue_category:
+                if venue_category not in venues_by_category:
+                    venues_by_category[venue_category] = []
+                venues_by_category[venue_category].append({
+                    "name": venue_name,
+                    "category": venue_category,
+                    "cost": venue_cost,
+                    "description": venue.get("description", ""),
+                    "address": venue.get("address"),
+                    "phone": venue.get("phone"),
+                    "url": venue.get("url"),
+                    "duration": venue.get("duration", "1 hour"),
+                    "best_time": venue.get("best_time", "flexible")
+                })
+    
+    # Extract activities and costs from FundAllocationAgent output
+    # FundAllocationAgent returns: {"activities": [{"activity": "eat", "cost": 123.45}, ...], "leftover_budget": ...}
+    fund_activities_list = fund.get("activities", [])
+    fund_activity_costs = {}  # Map category -> allocated cost
+    
+    for act in fund_activities_list:
+        if isinstance(act, dict):
+            activity_category = act.get("activity", "").lower()
+            cost = float(act.get("cost", 0))
+            if activity_category and activity_category != "transit":
+                fund_activity_costs[activity_category] = cost
+    
+    # Get transit cost from fund allocation
+    transit_cost = 0.0
+    for act in fund_activities_list:
+        if isinstance(act, dict) and act.get("activity", "").lower() == "transit":
+            transit_cost = float(act.get("cost", 0))
+            break
+    
+    if transit_cost == 0:
+        transit_cost = min(budget * 0.12, 50.0)
     
     # Log filtering operation
     print(f"\nFiltering for {location} (Budget: ${budget:.2f})")
     print(f"Interests: {interest_activities}")
-    print(f"Available activities: {len(fund_activities)}")
+    print(f"Available venues by category: {list(venues_by_category.keys())}")
+    print(f"Budget categories with costs: {list(fund_activity_costs.keys())}")
 
-    # Filter activities that match user interests
-    matched = filter_activities_by_interest(fund_activities, interest_activities)
+    # Match venues to interest categories and select ones that fit budget
+    selected_venues = []
+    total_cost = transit_cost
     
-    print(f"Matched to interests: {len(matched)}")
-
-    # If nothing matched by keyword mapping, try direct interest matching
-    if not matched:
-        # try any keyword presence
-        for act in fund_activities:
-            for interest in interest_activities:
-                if interest.lower() in act.lower():
-                    matched.append(act)
+    # For each interest category, find matching venues and select the first one that fits
+    for interest_cat in interest_activities:
+        interest_cat_lower = interest_cat.lower()
+        
+        # Find allocated budget for this category
+        allocated_cost = fund_activity_costs.get(interest_cat_lower, 0)
+        
+        # If no direct match, try to find a matching category in fund_activity_costs
+        if allocated_cost == 0:
+            for fund_cat, cost in fund_activity_costs.items():
+                if match_venue_to_category(fund_cat, interest_cat_lower):
+                    allocated_cost = cost
                     break
-
-    # If still nothing, use all activities (best-effort)
-    activities_to_estimate = matched if matched else fund_activities
-
-    # Estimate costs for selected activities
-    cost_data = generate_fallback_costs(activities_to_estimate, location, budget)
-
-    # Ensure selection fits budget (includes transit)
-    selection = select_activities_within_budget(cost_data, budget)
-
+        
+        # Find venues that match this interest category
+        matching_venues = []
+        for venue_cat, venues in venues_by_category.items():
+            if match_venue_to_category(venue_cat, interest_cat_lower):
+                matching_venues.extend(venues)
+        
+        # Select the first venue that fits within the allocated budget (or total remaining budget)
+        selected_venue = None
+        for venue in matching_venues:
+            venue_cost = venue.get("cost", 0)
+            # Check if venue fits within allocated cost for this category AND total budget
+            if venue_cost > 0 and (allocated_cost == 0 or venue_cost <= allocated_cost) and (total_cost + venue_cost) <= budget:
+                selected_venue = venue
+                break
+        
+        # If no venue fits allocated cost, try to find any venue that fits total budget
+        if not selected_venue:
+            for venue in matching_venues:
+                venue_cost = venue.get("cost", 0)
+                if venue_cost > 0 and (total_cost + venue_cost) <= budget:
+                    selected_venue = venue
+                    break
+        
+        if selected_venue:
+            selected_venues.append(selected_venue)
+            total_cost += selected_venue.get("cost", 0)
+            print(f"Selected venue for {interest_cat}: {selected_venue.get('name')} (${selected_venue.get('cost', 0):.2f})")
+    
+    # Get start_time and end_time from events or fund data
+    start_time = events.get("start_time") or fund.get("start_time")
+    end_time = events.get("end_time") or fund.get("end_time")
+    
+    # Schedule activities with timing and transit, passing all available venues for adding more
+    scheduled_activities = schedule_activities(selected_venues, venues_by_category, location, budget, total_cost, start_time, end_time)
+    
+    # Format output with scheduled activities
+    activities_output = {}
+    total_scheduled_cost = 0.0
+    
+    for i, activity in enumerate(scheduled_activities, 1):
+        activities_output[f"Activity {i}"] = {
+            "venue": activity.get("venue", ""),
+            "type": activity.get("type", "venue"),
+            "category": activity.get("category", ""),
+            "start_time": activity.get("start_time", ""),
+            "end_time": activity.get("end_time", ""),
+            "duration_minutes": activity.get("duration_minutes", 0),
+            "cost": round(activity.get("cost", 0), 2),
+            "description": activity.get("description", ""),
+            "address": activity.get("address"),
+            "phone": activity.get("phone"),
+            "url": activity.get("url")
+        }
+        if activity.get("type") == "transit":
+            activities_output[f"Activity {i}"]["method"] = activity.get("method", "walking")
+        
+        total_scheduled_cost += activity.get("cost", 0)
+    
+    remaining_budget = budget - total_scheduled_cost
+    
     output = {
         "location": location,
         "budget": budget,
         "interest_activities": interest_activities,
-        "input_activities": fund_activities,
-        "matched_activities": activities_to_estimate,
-        "filtered_selection": selection,
+        "activities": activities_output,
+        "total_cost": round(total_scheduled_cost, 2),
+        "remaining_budget": round(remaining_budget, 2),
         "summary": {
-            "total_input_activities": len(fund_activities),
-            "matched_to_interests": len(activities_to_estimate),
-            "selected_within_budget": len(selection.get("selected_activities", [])),
-            "total_cost": selection.get("total_estimated_cost", 0),
-            "remaining_budget": selection.get("remaining_budget", 0)
+            "total_activities": len(scheduled_activities),
+            "total_cost": round(total_scheduled_cost, 2),
+            "remaining_budget": round(remaining_budget, 2)
         }
     }
 
-    print(f"Selected: {len(selection.get('selected_activities', []))} activities")
-    print(f"Total cost: ${selection.get('total_estimated_cost', 0):.2f}")
-    print(f"Remaining: ${selection.get('remaining_budget', 0):.2f}")
+    print(f"Scheduled: {len(scheduled_activities)} activities")
+    print(f"Total cost: ${total_scheduled_cost:.2f}")
+    print(f"Remaining: ${remaining_budget:.2f}")
 
     return output
 
-
-if __name__ == "__main__":
-    main()
 
 # --- Optional uagents chat handler ------------------------------------------------
 if UA_PRESENT:
     agent = Agent(
         name="BudgetFilter",
         seed=os.getenv("BUDGET_FILTER_AGENT_SEED", "budget-filter-seed"),
-        port=int(os.getenv("BUDGET_FILTER_AGENT_PORT", "8004")),
+        port=int(os.getenv("BUDGET_FILTER_AGENT_PORT", "8006")),
         mailbox=True,
         publish_agent_details=True,
         network=os.getenv("AGENT_NETWORK", "testnet"),
@@ -479,10 +872,8 @@ if UA_PRESENT:
         
         Returns filtered_output with activities matching interests and budget constraints.
         """
-        await ctx.send(
-            sender,
-            ChatAcknowledgement(timestamp=datetime.utcnow(), acknowledged_msg_id=msg.msg_id),
-        )
+        # NOTE: Not sending ChatAcknowledgement to avoid interfering with ctx.send_and_receive
+        # The orchestrator uses send_and_receive which can match acknowledgements instead of actual responses
 
         try:
             for item in msg.content:
@@ -570,4 +961,18 @@ if UA_PRESENT:
 
 
 if __name__ == "__main__":
-    main()
+    import sys
+    # If run with --agent flag or RUN_BUDGET_FILTER_AGENT env var, start the agent
+    if "--agent" in sys.argv or os.getenv("RUN_BUDGET_FILTER_AGENT", "false").lower() in ("1", "true", "yes"):
+        if UA_PRESENT:
+            print(f"Budget Filter Agent address: {agent.address}")
+            print(f"Port: {os.getenv('BUDGET_FILTER_AGENT_PORT', '8006')}")
+            print(f"Network: {os.getenv('AGENT_NETWORK', 'testnet')}")
+            print("\nStarting budget filter agent...")
+            agent.run()
+        else:
+            print("Error: uagents library not available. Cannot run agent.")
+            sys.exit(1)
+    else:
+        # Otherwise, run the test/main function with example files
+        main()

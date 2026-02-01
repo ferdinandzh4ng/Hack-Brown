@@ -2,11 +2,12 @@
 
 import React, { useState, useMemo, useCallback, useRef, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import Map from 'react-map-gl/mapbox';
+import MapGL from 'react-map-gl/mapbox';
 import { Marker, Source, Layer } from 'react-map-gl/mapbox';
 import type { MapRef } from 'react-map-gl/mapbox';
-import { ShieldCheck, Sparkles, MapPin, ArrowUp, X, Sun, Moon, Check } from 'lucide-react';
+import { ShieldCheck, Sparkles, MapPin, ArrowUp, X, Sun, Moon, Check, ArrowRight } from 'lucide-react';
 import insightsData from '@/data/insights.json';
+import { City } from 'country-state-city';
 import 'mapbox-gl/dist/mapbox-gl.css';
 
 type ViewState = 'IDLE' | 'THINKING' | 'RESULTS';
@@ -21,6 +22,9 @@ interface Recommendation {
   startTime?: string;
   endTime?: string;
   coordinates?: [number, number];
+  address?: string;
+  type?: 'venue' | 'transit';
+  transitMethod?: string;
 }
 
 interface ItineraryGroup {
@@ -228,23 +232,62 @@ export default function VICAppleMapsDemo() {
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [drawerHeightPercent, setDrawerHeightPercent] = useState(50);
   const [isDarkMode, setIsDarkMode] = useState(false);
-  const [displayMode, setDisplayMode] = useState<DisplayMode>('single');
+  const [displayMode, setDisplayMode] = useState<DisplayMode>('itinerary');
   const [activeItineraryIndex, setActiveItineraryIndex] = useState(0);
   const dragRef = useRef({ isDragging: false, startY: 0, startPercent: 0 });
   const mapRef = useRef<MapRef | null>(null);
+  
+  // Form state
+  const [location, setLocation] = useState('');
+  const [startTime, setStartTime] = useState('');
+  const [endTime, setEndTime] = useState('');
+  const [isLoading, setIsLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [apiRecommendations, setApiRecommendations] = useState<Recommendation[]>([]);
+  const [transitInfo, setTransitInfo] = useState<Map<number, any>>(new Map());
+  const [apiBudget, setApiBudget] = useState<number | null>(null);
 
-  const recommendations = useMemo(() => flattenRecommendations(itinerariesData), []);
+  // Get all cities from library and format for dropdown
+  const citiesList = useMemo(() => {
+    const allCities = City.getAllCities();
+    // Format as "City, State, Country" or "City, Country" if no state
+    return allCities.map(city => {
+      if (city.stateCode) {
+        return `${city.name}, ${city.stateCode}, ${city.countryCode}`;
+      }
+      return `${city.name}, ${city.countryCode}`;
+    }).sort();
+  }, []);
+
+  // Use API recommendations if available, otherwise fall back to static data
+  const recommendations = useMemo(() => {
+    if (apiRecommendations.length > 0) {
+      return apiRecommendations;
+    }
+    return flattenRecommendations(itinerariesData);
+  }, [apiRecommendations]);
+
+  // Create itinerary groups from API data or static data
+  const itineraryGroups = useMemo(() => {
+    if (apiRecommendations.length > 0) {
+      return [{
+        group_name: `${location} Itinerary`,
+        items: apiRecommendations
+      }];
+    }
+    return itinerariesData;
+  }, [apiRecommendations, location]);
 
   const activeGroupItems = useMemo(() => {
-    if (displayMode !== 'itinerary' || !itinerariesData[activeItineraryIndex]) return [];
-    const items = itinerariesData[activeItineraryIndex].items.slice();
+    if (displayMode !== 'itinerary' || !itineraryGroups[activeItineraryIndex]) return [];
+    const items = itineraryGroups[activeItineraryIndex].items.slice();
     items.sort((a, b) => {
       const sa = a.startTime ? parseTimeToMinutes(a.startTime) : 0;
       const sb = b.startTime ? parseTimeToMinutes(b.startTime) : 0;
       return sa - sb;
     });
     return items;
-  }, [displayMode, activeItineraryIndex]);
+  }, [displayMode, activeItineraryIndex, itineraryGroups]);
 
   const itemsForView = displayMode === 'single' ? recommendations : activeGroupItems;
 
@@ -261,10 +304,17 @@ export default function VICAppleMapsDemo() {
     [selectedIds, recommendations]
   );
 
-  const remainingBudget = useMemo(
-    () => Math.max(0, Math.round((INITIAL_BUDGET - spent) * 100) / 100),
-    [spent]
-  );
+  const remainingBudget = useMemo(() => {
+    // If we have API budget, calculate remaining from total cost
+    if (apiBudget !== null) {
+      const totalSpent = recommendations
+        .filter((r) => selectedIds.includes(r.id))
+        .reduce((sum, r) => sum + parseCost(r.cost), 0);
+      return Math.max(0, Math.round((apiBudget - totalSpent) * 100) / 100);
+    }
+    // Otherwise use initial budget
+    return Math.max(0, Math.round((INITIAL_BUDGET - spent) * 100) / 100);
+  }, [spent, apiBudget, recommendations, selectedIds]);
 
   useEffect(() => {
     setSelectedIds([]);
@@ -293,11 +343,181 @@ export default function VICAppleMapsDemo() {
     );
   }, [viewState, displayMode, activeItineraryIndex, itemsForView, hasMapboxToken]);
 
-  const handleSearch = useCallback(() => {
-    if (!chatInput.trim()) return;
+  // Geocode address using Mapbox
+  const geocodeAddress = useCallback(async (address: string): Promise<[number, number] | null> => {
+    if (!address || !MAPBOX_ACCESS_TOKEN) return null;
+    
+    try {
+      const response = await fetch(
+        `https://api.mapbox.com/geocoding/v5/mapbox.places/${encodeURIComponent(address)}.json?access_token=${MAPBOX_ACCESS_TOKEN}&limit=1`
+      );
+      const data = await response.json();
+      if (data.features && data.features.length > 0) {
+        const [lng, lat] = data.features[0].center;
+        return [lng, lat];
+      }
+    } catch (err) {
+      console.error('Geocoding error:', err);
+    }
+    return null;
+  }, []);
+
+  // Transform backend response to frontend format
+  const transformBackendResponse = useCallback(async (backendData: any): Promise<{ recommendations: Recommendation[], transitInfo: Map<number, any> }> => {
+    if (!backendData || !backendData.activities) return { recommendations: [], transitInfo: new Map() };
+    
+    const activities = backendData.activities;
+    const recommendations: Recommendation[] = [];
+    const transitInfo = new Map<number, any>();
+    
+    // Convert activities object to array and process in order
+    const activityEntries = Object.entries(activities).sort((a, b) => {
+      const aTime = (a[1] as any).start_time || '';
+      const bTime = (b[1] as any).start_time || '';
+      return aTime.localeCompare(bTime);
+    });
+    
+    let venueIndex = 0;
+    
+    for (let i = 0; i < activityEntries.length; i++) {
+      const [key, activity] = activityEntries[i];
+      const act = activity as any;
+      
+      // Handle transit activities - store them for arrows between venues
+      if (act.type === 'transit') {
+        // Store transit info with the venue index (will be shown before the next venue)
+        transitInfo.set(venueIndex, {
+          method: act.method || 'walking',
+          duration: act.duration_minutes || 15,
+          cost: act.cost || 0,
+          description: act.description || ''
+        });
+        continue;
+      }
+      
+      // Extract time from ISO string
+      const startTimeStr = act.start_time ? new Date(act.start_time).toLocaleTimeString('en-US', { 
+        hour: '2-digit', 
+        minute: '2-digit',
+        hour12: false 
+      }) : undefined;
+      
+      const endTimeStr = act.end_time ? new Date(act.end_time).toLocaleTimeString('en-US', { 
+        hour: '2-digit', 
+        minute: '2-digit',
+        hour12: false 
+      }) : undefined;
+      
+      // Geocode address
+      let coordinates: [number, number] | undefined;
+      if (act.address) {
+        const coords = await geocodeAddress(act.address);
+        if (coords) coordinates = coords;
+      }
+      
+      const recId = key.toLowerCase().replace(/\s+/g, '-');
+      recommendations.push({
+        id: recId,
+        title: act.venue || 'Unknown Venue',
+        cost: `$${act.cost?.toFixed(2) || '0.00'}`,
+        agent_reasoning: act.description || 'Part of your curated experience.',
+        score: '85',
+        startTime: startTimeStr,
+        endTime: endTimeStr,
+        coordinates,
+        address: act.address,
+        type: act.type || 'venue'
+      });
+      
+      venueIndex++;
+    }
+    
+    // Already sorted by time from backend, but ensure it
+    recommendations.sort((a, b) => {
+      if (!a.startTime || !b.startTime) return 0;
+      return a.startTime.localeCompare(b.startTime);
+    });
+    
+    return { recommendations, transitInfo };
+  }, [geocodeAddress]);
+
+  const handleSearch = useCallback(async () => {
+    // Validate form
+    if (!chatInput.trim()) {
+      setError('Please enter your request');
+      return;
+    }
+    if (!location) {
+      setError('Please select a location');
+      return;
+    }
+    if (!startTime) {
+      setError('Please select a start time');
+      return;
+    }
+    if (!endTime) {
+      setError('Please select an end time');
+      return;
+    }
+    
+    setError(null);
+    setIsLoading(true);
     setViewState('THINKING');
-    setTimeout(() => setViewState('RESULTS'), 3000);
-  }, [chatInput]);
+    
+    try {
+      // Convert local datetime to ISO 8601
+      const startTimeISO = new Date(startTime).toISOString();
+      const endTimeISO = new Date(endTime).toISOString();
+      
+      // Call bridge server API
+      const response = await fetch('http://localhost:8005/api/schedule', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          user_request: chatInput,
+          location: location,
+          start_time: startTimeISO,
+          end_time: endTimeISO
+        })
+      });
+      
+      if (!response.ok) {
+        throw new Error(`API error: ${response.statusText}`);
+      }
+      
+      const result = await response.json();
+      
+      if (!result.success) {
+        throw new Error(result.error || 'Unknown error');
+      }
+      
+      // Transform response
+      const { recommendations, transitInfo: transit } = await transformBackendResponse(result.data);
+      setApiRecommendations(recommendations);
+      setTransitInfo(transit);
+      
+      // Set budget from API response
+      if (result.data?.budget) {
+        setApiBudget(result.data.budget);
+      }
+      
+      // Create itinerary group from transformed data
+      if (recommendations.length > 0) {
+        setViewState('RESULTS');
+      } else {
+        throw new Error('No activities found');
+      }
+      
+    } catch (err) {
+      console.error('Search error:', err);
+      setError(err instanceof Error ? err.message : 'Failed to create schedule');
+      setViewState('IDLE');
+    } finally {
+      setIsLoading(false);
+    }
+  }, [chatInput, location, startTime, endTime, transformBackendResponse]);
 
   const handleAuthorize = useCallback((id: string) => {
     setSelectedIds((prev) =>
@@ -407,7 +627,7 @@ export default function VICAppleMapsDemo() {
       {/* Map layer: always full viewport (dvh for mobile); fixed so drawer scroll doesn’t move it */}
       <div className="absolute inset-0 w-full h-[100dvh] min-h-[100dvh]">
         {hasMapboxToken ? (
-          <Map
+          <MapGL
             ref={mapRef}
             mapboxAccessToken={MAPBOX_ACCESS_TOKEN}
             initialViewState={BROWN_VIEWPORT}
@@ -452,7 +672,7 @@ export default function VICAppleMapsDemo() {
                   </Marker>
                 );
               })}
-          </Map>
+          </MapGL>
         ) : (
           <div className="absolute inset-0 flex items-center justify-center bg-gradient-to-b from-slate-100 to-slate-200">
             <div className="flex flex-col items-center gap-3 text-slate-400">
@@ -534,6 +754,13 @@ export default function VICAppleMapsDemo() {
                 setViewState('IDLE');
                 setChatInput('');
                 setSelectedIds([]);
+                setLocation('');
+                setStartTime('');
+                setEndTime('');
+                setApiRecommendations([]);
+                setTransitInfo(new Map());
+                setApiBudget(null);
+                setError(null);
               }}
               className={`p-1.5 md:p-2 rounded-full ${
                 isDarkMode ? 'bg-slate-700 text-slate-300 hover:bg-slate-600' : 'bg-slate-100 text-slate-400 hover:bg-slate-200'
@@ -586,9 +813,9 @@ export default function VICAppleMapsDemo() {
             </div>
           </div>
 
-          {viewState === 'RESULTS' && displayMode === 'itinerary' && (
+          {viewState === 'RESULTS' && displayMode === 'itinerary' && itineraryGroups.length > 1 && (
             <div className={`mb-4 flex gap-1 p-1 rounded-xl ${isDarkMode ? 'bg-slate-800' : 'bg-slate-100'}`} role="tablist" aria-label="Itinerary group">
-              {itinerariesData.map((grp, idx) => (
+              {itineraryGroups.map((grp, idx) => (
                 <button
                   key={grp.group_name}
                   type="button"
@@ -619,22 +846,84 @@ export default function VICAppleMapsDemo() {
                 className="h-full flex flex-col justify-center px-2 md:px-4"
               >
                 <p className={`font-sans text-center text-xs md:text-sm mb-4 md:mb-6 ${drawerMuted}`}>
-                  Where are you? What’s your budget?
+                  Where are you? What's your budget?
                 </p>
-                <div className="relative flex items-center gap-2 max-w-xl mx-auto w-full">
-                  <input
-                    value={chatInput}
-                    onChange={(e) => setChatInput(e.target.value)}
-                    onKeyDown={(e) => e.key === 'Enter' && handleSearch()}
-                    placeholder="I'm in NYC for a day with $200"
-                    className={`font-sans w-full ${inputBg} p-4 pr-12 md:p-5 md:pr-14 rounded-2xl text-sm md:text-base placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-visa-blue/20 ${drawerText}`}
-                  />
-                  <button
-                    onClick={handleSearch}
-                    className="absolute right-2 md:right-3 p-2 md:p-2.5 bg-visa-blue text-white rounded-xl active:scale-95 transition-transform"
-                  >
-                    <ArrowUp className="w-5 h-5 md:w-6 md:h-6" />
-                  </button>
+                
+                <div className="max-w-4xl mx-auto w-full space-y-4">
+                  {/* First Row: Location, Start Time, End Time */}
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-3 md:gap-4">
+                    {/* Location - Free Text */}
+                    <div>
+                      <label className={`block text-xs font-semibold mb-2 ${drawerText}`}>
+                        Location
+                      </label>
+                      <input
+                        type="text"
+                        value={location}
+                        onChange={(e) => setLocation(e.target.value)}
+                        placeholder="New York City, NY"
+                        className={`font-sans w-full ${inputBg} p-3 md:p-4 rounded-xl text-sm md:text-base placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-visa-blue/20 ${drawerText}`}
+                      />
+                    </div>
+                    
+                    {/* Start Time */}
+                    <div>
+                      <label className={`block text-xs font-semibold mb-2 ${drawerText}`}>
+                        Start Time
+                      </label>
+                      <input
+                        type="datetime-local"
+                        value={startTime}
+                        onChange={(e) => setStartTime(e.target.value)}
+                        className={`font-sans w-full ${inputBg} p-3 md:p-4 rounded-xl text-sm md:text-base focus:outline-none focus:ring-2 focus:ring-visa-blue/20 ${drawerText}`}
+                      />
+                    </div>
+                    
+                    {/* End Time */}
+                    <div>
+                      <label className={`block text-xs font-semibold mb-2 ${drawerText}`}>
+                        End Time
+                      </label>
+                      <input
+                        type="datetime-local"
+                        value={endTime}
+                        onChange={(e) => setEndTime(e.target.value)}
+                        className={`font-sans w-full ${inputBg} p-3 md:p-4 rounded-xl text-sm md:text-base focus:outline-none focus:ring-2 focus:ring-visa-blue/20 ${drawerText}`}
+                      />
+                    </div>
+                  </div>
+                  
+                  {/* Second Row: User Request Input with Submit Button */}
+                  <div>
+                    <label className={`block text-xs font-semibold mb-2 ${drawerText}`}>
+                      Your Request
+                    </label>
+                    <div className="relative flex items-center gap-2">
+                      <input
+                        value={chatInput}
+                        onChange={(e) => setChatInput(e.target.value)}
+                        onKeyDown={(e) => e.key === 'Enter' && handleSearch()}
+                        placeholder="I want to eat, sightsee, and have fun with $200"
+                        className={`font-sans w-full ${inputBg} p-3 md:p-4 pr-12 md:pr-14 rounded-xl text-sm md:text-base placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-visa-blue/20 ${drawerText}`}
+                      />
+                      <button
+                        onClick={handleSearch}
+                        disabled={isLoading}
+                        className={`absolute right-2 md:right-3 p-2 md:p-2.5 bg-visa-blue text-white rounded-xl active:scale-95 transition-transform ${
+                          isLoading ? 'opacity-50 cursor-not-allowed' : ''
+                        }`}
+                      >
+                        <ArrowUp className="w-4 h-4 md:w-5 md:h-5" />
+                      </button>
+                    </div>
+                  </div>
+                  
+                  {/* Error Message */}
+                  {error && (
+                    <div className={`p-3 rounded-xl text-sm ${isDarkMode ? 'bg-red-500/20 text-red-300' : 'bg-red-50 text-red-700'}`}>
+                      {error}
+                    </div>
+                  )}
                 </div>
               </motion.div>
             )}
@@ -655,7 +944,7 @@ export default function VICAppleMapsDemo() {
                   />
                   <div>
                     <h3 className={`text-lg md:text-2xl font-bold tracking-tight ${drawerText}`}>
-                      Analyzing NYC vendors...
+                      Analyzing {location || 'vendors'}...
                     </h3>
                     <p className={`text-sm md:text-base ${drawerMuted}`}>
                       Finding places that match your budget and style.
@@ -694,7 +983,7 @@ export default function VICAppleMapsDemo() {
                   <h3
                     className={`font-heading font-bold text-xs md:text-sm uppercase tracking-widest ${drawerMuted}`}
                   >
-                    {displayMode === 'itinerary' ? itinerariesData[activeItineraryIndex]?.group_name ?? 'Itinerary' : 'Recommended for You'}
+                    {displayMode === 'itinerary' ? itineraryGroups[activeItineraryIndex]?.group_name ?? 'Itinerary' : 'Recommended for You'}
                   </h3>
                   <span
                     className={`font-price text-xs md:text-sm font-bold px-2 py-1.5 md:px-3 md:py-2 rounded-md tracking-tighter ${
@@ -733,19 +1022,36 @@ export default function VICAppleMapsDemo() {
                     ) : (
                       <>
                         <div className="relative grid grid-cols-1 md:grid-cols-3 gap-x-8 gap-y-12 items-stretch before:absolute before:left-[19px] before:top-0 before:bottom-0 before:w-[2px] before:bg-slate-200 before:dark:bg-slate-600 before:content-[''] md:before:hidden">
-                          {activeGroupItems.map((rec) => (
-                            <ItineraryCard
-                              key={rec.id}
-                              rec={rec}
-                              isSelected={selectedIds.includes(rec.id)}
-                              isHighlighted={highlightedCardId === rec.id}
-                              cardBg={cardBg}
-                              drawerText={drawerText}
-                              drawerMuted={drawerMuted}
-                              isDarkMode={isDarkMode}
-                              onAuthorize={handleAuthorize}
-                            />
-                          ))}
+                          {activeGroupItems.map((rec, index) => {
+                            const transit = transitInfo.get(index);
+                            const showTransit = transit && index > 0;
+                            
+                            return (
+                              <React.Fragment key={rec.id}>
+                                {showTransit && (
+                                  <div className="col-span-1 md:col-span-3 flex items-center justify-center py-4">
+                                    <div className={`flex items-center gap-2 px-4 py-2 rounded-lg ${isDarkMode ? 'bg-slate-800' : 'bg-slate-100'}`}>
+                                      <ArrowRight className={`w-4 h-4 ${drawerMuted}`} />
+                                      <span className={`text-xs font-medium ${drawerMuted}`}>
+                                        {transit.method} • {transit.duration} min
+                                        {transit.cost > 0 && ` • $${transit.cost.toFixed(2)}`}
+                                      </span>
+                                    </div>
+                                  </div>
+                                )}
+                                <ItineraryCard
+                                  rec={rec}
+                                  isSelected={selectedIds.includes(rec.id)}
+                                  isHighlighted={highlightedCardId === rec.id}
+                                  cardBg={cardBg}
+                                  drawerText={drawerText}
+                                  drawerMuted={drawerMuted}
+                                  isDarkMode={isDarkMode}
+                                  onAuthorize={handleAuthorize}
+                                />
+                              </React.Fragment>
+                            );
+                          })}
                         </div>
                         <div className={`mt-12 pt-6 border-t ${drawerBorder}`}>
                           <button

@@ -52,6 +52,7 @@ class OrchestratorState(TypedDict):
     end_time: Optional[str]  # ISO 8601 datetime string
     fund_allocation_response: Optional[Dict]
     events_scraper_response: Optional[Dict]
+    budget_filter_response: Optional[Dict]
     final_output: Optional[Dict]
     error: Optional[str]
 
@@ -87,6 +88,11 @@ FUND_ALLOCATION_AGENT_ADDRESS = os.getenv(
 EVENTS_SCRAPER_AGENT_ADDRESS = os.getenv(
     "EVENTS_SCRAPER_AGENT_ADDRESS",
     "agent1q0ngan90nxrwqs27uj6q7scr2fv2ddsx42kvvkkqkv5rgunzwndeguyx9cy"  # Replace with actual eventsScraperAgent address
+)
+
+BUDGET_FILTER_AGENT_ADDRESS = os.getenv(
+    "BUDGET_FILTER_AGENT_ADDRESS",
+    "agent1qdag7q4nawz3lplyhqv8pkslsxggxsuf5n5m866826f62frl4ypt5zn02rz"  # Replace with actual budgetFilterAgent address
 )
 
 # No longer needed - using send_and_receive instead of manual future handling
@@ -472,6 +478,60 @@ async def call_events_scraper_agent(ctx: Context, activities: List[str], locatio
         ctx.logger.error(traceback.format_exc())
         return {"error": str(e)}
 
+async def call_budget_filter_agent(ctx: Context, events_response: Dict, fund_response: Dict) -> Dict:
+    """Call budget filter agent using send_and_receive with both agent outputs"""
+    try:
+        # Combine both responses for the budget filter
+        request_data = {
+            "events": events_response,
+            "fund": fund_response
+        }
+        
+        message = ChatMessage(
+            timestamp=datetime.now(timezone.utc),
+            msg_id=uuid4(),
+            content=[TextContent(type="text", text=json.dumps(request_data))],
+        )
+        
+        ctx.logger.info(f"Sending request to budget filter agent: {BUDGET_FILTER_AGENT_ADDRESS}")
+        
+        # Use send_and_receive
+        reply, status = await ctx.send_and_receive(
+            BUDGET_FILTER_AGENT_ADDRESS,
+            message,
+            response_type=ChatMessage,
+            timeout=120.0
+        )
+        
+        if isinstance(reply, ChatMessage):
+            # Extract text content
+            response_text = ""
+            for item in reply.content:
+                if isinstance(item, TextContent):
+                    response_text = item.text
+                    break
+            
+            if not response_text:
+                return {"error": "No text content in response"}
+            
+            ctx.logger.info(f"Received response from budget filter agent: {len(response_text)} chars")
+            
+            # Parse JSON response
+            try:
+                return json.loads(response_text)
+            except json.JSONDecodeError as e:
+                ctx.logger.error(f"JSON parse error: {e}, content: {response_text[:200]}")
+                return {"error": "Failed to parse budget filter response"}
+        else:
+            ctx.logger.error(f"Failed to receive response from budget filter agent: {status}")
+            return {"error": f"Failed to receive response: {status}"}
+        
+    except Exception as e:
+        ctx.logger.error(f"Error calling budget filter agent: {e}")
+        import traceback
+        ctx.logger.error(traceback.format_exc())
+        return {"error": str(e)}
+
 async def parallel_agent_calls_node(state: OrchestratorState, ctx: Context) -> OrchestratorState:
     """Node 3: Call both agents in parallel"""
     try:
@@ -515,28 +575,62 @@ async def parallel_agent_calls_node(state: OrchestratorState, ctx: Context) -> O
         state["error"] = f"Parallel agent calls error: {str(e)}"
         return state
 
-def combine_outputs_node(state: OrchestratorState) -> OrchestratorState:
-    """Node 4: Combine outputs from both agents"""
+async def call_budget_filter_node(state: OrchestratorState, ctx: Context) -> OrchestratorState:
+    """Node 4: Call budget filter agent with both agent outputs"""
     try:
         fund_allocation = state.get("fund_allocation_response", {})
         events_scraper = state.get("events_scraper_response", {})
-        location = state.get("location", "")
-        budget = state.get("budget", 0)
+        activities = state.get("activities", [])  # These are the interest_activities
         
-        # Combine the outputs
-        combined_output = {
-            "location": location,
-            "budget": budget,
-            "fund_allocation": fund_allocation,
-            "events_scraper": events_scraper,
-            "summary": {
-                "activities_found": len(events_scraper.get("activities", [])),
-                "total_estimated_cost": fund_allocation.get("activities", []),
-                "leftover_budget": fund_allocation.get("leftover_budget", 0)
+        # Check for errors
+        if fund_allocation.get("error") or events_scraper.get("error"):
+            ctx.logger.warning("One or both agents returned errors, skipping budget filter")
+            state["budget_filter_response"] = {"error": "Cannot filter due to agent errors"}
+            return state
+        
+        # Add interest_activities to events_scraper data for budget filter
+        # EventsScraperAgent doesn't return interest_activities, so we add them from state
+        events_with_interests = events_scraper.copy()
+        events_with_interests["interest_activities"] = activities
+        events_with_interests["location"] = state.get("location", "")
+        events_with_interests["budget"] = state.get("budget", 0)
+        events_with_interests["start_time"] = state.get("start_time")
+        events_with_interests["end_time"] = state.get("end_time")
+        
+        # Also add to fund_allocation for consistency
+        fund_with_times = fund_allocation.copy()
+        fund_with_times["start_time"] = state.get("start_time")
+        fund_with_times["end_time"] = state.get("end_time")
+        
+        ctx.logger.info("Calling budget filter agent with both agent outputs")
+        
+        # Call budget filter agent
+        budget_filter_response = await call_budget_filter_agent(ctx, events_with_interests, fund_with_times)
+        
+        state["budget_filter_response"] = budget_filter_response
+        return state
+    except Exception as e:
+        state["error"] = f"Budget filter error: {str(e)}"
+        return state
+
+def combine_outputs_node(state: OrchestratorState) -> OrchestratorState:
+    """Node 5: Return budget filter output as final result"""
+    try:
+        budget_filter = state.get("budget_filter_response", {})
+        
+        # Use filtered output if available, otherwise return error
+        if budget_filter and not budget_filter.get("error"):
+            # Return just the budget filter output - it contains everything needed
+            state["final_output"] = budget_filter
+        else:
+            # If filter failed, return error response
+            state["final_output"] = {
+                "type": "error",
+                "message": budget_filter.get("error", "Budget filter not executed"),
+                "location": state.get("location", ""),
+                "budget": state.get("budget", 0)
             }
-        }
         
-        state["final_output"] = combined_output
         return state
     except Exception as e:
         state["error"] = f"Combine outputs error: {str(e)}"
@@ -601,10 +695,16 @@ def get_or_create_workflow(ctx: Context) -> Any:
                 return await parallel_agent_calls_node(state, ctx)
             return parallel_node
         
+        def make_budget_filter_node():
+            async def budget_filter_node(state: OrchestratorState) -> OrchestratorState:
+                return await call_budget_filter_node(state, ctx)
+            return budget_filter_node
+        
         # Add nodes
         workflow.add_node("dispatch_intent", make_dispatch_node())
         workflow.add_node("extract_parameters", extract_parameters_node)
         workflow.add_node("parallel_calls", make_parallel_node())
+        workflow.add_node("budget_filter", make_budget_filter_node())
         workflow.add_node("combine_outputs", combine_outputs_node)
         workflow.add_node("handle_clarification", handle_clarification_node)
         workflow.add_node("handle_error", handle_error_node)
@@ -624,7 +724,8 @@ def get_or_create_workflow(ctx: Context) -> Any:
         )
         
         workflow.add_edge("extract_parameters", "parallel_calls")
-        workflow.add_edge("parallel_calls", "combine_outputs")
+        workflow.add_edge("parallel_calls", "budget_filter")
+        workflow.add_edge("budget_filter", "combine_outputs")
         workflow.add_edge("combine_outputs", END)
         workflow.add_edge("handle_clarification", END)
         workflow.add_edge("handle_error", END)
@@ -759,6 +860,7 @@ async def handle_user_message(ctx: Context, sender: str, msg: ChatMessage):
             "end_time": end_time_from_json,  # Use end_time from JSON or conversation_state
             "fund_allocation_response": None,
             "events_scraper_response": None,
+            "budget_filter_response": None,
             "final_output": None,
             "error": None
         }
@@ -831,6 +933,7 @@ if __name__ == "__main__":
     print(f"Intent Dispatcher Agent address: {INTENT_DISPATCHER_AGENT_ADDRESS}")
     print(f"Fund Allocation Agent address: {FUND_ALLOCATION_AGENT_ADDRESS}")
     print(f"Events Scraper Agent address: {EVENTS_SCRAPER_AGENT_ADDRESS}")
+    print(f"Budget Filter Agent address: {BUDGET_FILTER_AGENT_ADDRESS}")
     print("\nStarting orchestrator agent...")
     agent.run()
 
