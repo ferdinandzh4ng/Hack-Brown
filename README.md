@@ -19,7 +19,7 @@ Utilizing Fetchai, we were able to relegate tasks such as organizing a user's ho
 
 # Challenges we ran into
 
-Our biggest challenge was that we had to pivot our idea since the API reflected our initial idea that we'd fully built our plan around. 
+Our biggest challenge was that we had to pivot our idea since the API reflected the initial one that we'd fully built our plan around. Another major challenge was that we intended for purchasing to be fully functional, but with fetch.ai's instabilities, we could not get it functioning, so we cut the purchasing feature since it was always meant for Visa's API 
 
 # accomplishments we're proud of
 
