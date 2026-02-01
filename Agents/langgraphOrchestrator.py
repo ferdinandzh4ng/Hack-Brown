@@ -229,8 +229,17 @@ async def call_intent_dispatcher_agent(
             try:
                 response_data = json.loads(response_text)
                 
+                # Check if it's a clarification response (has type "clarification_needed")
+                if isinstance(response_data, dict) and response_data.get("type") == "clarification_needed":
+                    return {
+                        "type": "clarification_needed",
+                        "data": {
+                            "prompt": response_data.get("prompt", response_text),
+                            "conversation_state": response_data.get("conversation_state", conversation_state)
+                        }
+                    }
                 # Check if it's a dispatch plan (has activity_list)
-                if isinstance(response_data, dict) and "activity_list" in response_data:
+                elif isinstance(response_data, dict) and "activity_list" in response_data:
                     return {
                         "type": "dispatch_plan",
                         "data": response_data
@@ -248,9 +257,9 @@ async def call_intent_dispatcher_agent(
                         "data": response_data
                     }
             except json.JSONDecodeError:
-                # If not JSON, it's likely a clarification prompt (plain text)
-                # The intent dispatcher sends clarification prompts as plain text
-                ctx.logger.info("Response is not JSON, treating as clarification prompt")
+                # If not JSON, it's likely a clarification prompt (plain text) - fallback for backward compatibility
+                # The intent dispatcher should now send clarification prompts as JSON, but handle plain text as fallback
+                ctx.logger.info("Response is not JSON, treating as clarification prompt (fallback)")
                 return {
                     "type": "clarification_needed",
                     "data": {
@@ -707,19 +716,47 @@ async def handle_user_message(ctx: Context, sender: str, msg: ChatMessage):
         conversation_state_key = f"conversation_state_{sender}"
         conversation_state = ctx.storage.get(conversation_state_key)
         
-        # Initialize state with JSON values if provided
+        # Check if we're waiting for clarification from a previous vague request
+        # Only use conversation_state data if:
+        # 1. conversation_state exists and indicates waiting for clarification
+        # 2. AND the current message is NOT a new request (i.e., no JSON data with location/user_request)
+        # If user sends a new request with JSON data, treat it as a NEW request and clear old conversation_state
+        is_new_request_with_json = parsed_json and "user_request" in parsed_json and "location" in parsed_json
+        
+        if conversation_state and conversation_state.get("waiting_for_clarification") and not is_new_request_with_json:
+            # User is replying to a clarification prompt (plain text response, not a new JSON request)
+            ctx.logger.info("User is replying to a clarification prompt - preserving original request data")
+            # Extract original data from conversation_state (these take priority)
+            original_location = conversation_state.get("location", "")
+            original_start_time = conversation_state.get("start_time")
+            original_end_time = conversation_state.get("end_time")
+            
+            # Use original values if they exist, otherwise fall back to JSON input
+            location_from_json = original_location or location_from_json or ""
+            start_time_from_json = original_start_time if original_start_time and original_start_time != "null" else start_time_from_json
+            end_time_from_json = original_end_time if original_end_time and original_end_time != "null" else end_time_from_json
+            
+            ctx.logger.info(f"Using original request data: location={location_from_json}, start_time={start_time_from_json}, end_time={end_time_from_json}")
+            ctx.logger.info(f"User's clarification response: {user_request_text}")
+        elif is_new_request_with_json and conversation_state:
+            # User sent a new request with JSON data - clear old conversation_state
+            ctx.logger.info("User sent a new request with JSON data - clearing old conversation_state")
+            ctx.storage.set(conversation_state_key, None)
+            conversation_state = None
+        
+        # Initialize state with JSON values if provided (or from conversation_state if waiting for clarification)
         initial_state: OrchestratorState = {
-            "user_input": user_request_text,  # Use user_request for intent dispatcher
+            "user_input": user_request_text,  # Use user_request for intent dispatcher (or clarification response)
             "sender": sender,
             "conversation_state": conversation_state,
             "dispatch_result": None,
             "dispatch_plan": None,
             "activities": [],
-            "location": location_from_json or "",  # Use location from JSON
+            "location": location_from_json or "",  # Use location from JSON or conversation_state
             "budget": 0.0,
             "timeframe": "",
-            "start_time": start_time_from_json,  # Use start_time from JSON
-            "end_time": end_time_from_json,  # Use end_time from JSON
+            "start_time": start_time_from_json,  # Use start_time from JSON or conversation_state
+            "end_time": end_time_from_json,  # Use end_time from JSON or conversation_state
             "fund_allocation_response": None,
             "events_scraper_response": None,
             "final_output": None,

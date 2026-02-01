@@ -105,13 +105,21 @@ A request is considered vague if:
 A request is NOT vague if:
 - It mentions specific activities (e.g., "I want to visit the Eiffel Tower and eat at a French restaurant")
 - It includes clear preferences (e.g., "I like museums and art galleries")
-- It specifies activity types (e.g., "I want to go shopping and sightseeing", "eat and sightsee", "dining and sightseeing")
-- It mentions activity categories like "eat", "dining", "sightsee", "sightseeing", "shop", "shopping", etc. along with a budget
+- It specifies activity types or categories, including:
+  * "eat", "dining", "food", "restaurant", "meal"
+  * "sightsee", "sightseeing", "sights", "landmarks", "monuments", "museums"
+  * "shop", "shopping", "markets", "boutiques"
+  * "entertainment", "get entertainment", "get some entertainment", "shows", "concerts", "nightlife", "bars", "clubs", "theater"
+  * "outdoor", "parks", "hiking", "nature"
+  * "cultural", "art", "galleries", "history"
+  * "relax", "spa", "wellness"
+- Examples of NOT vague: "eat and sightsee", "dining and sightseeing", "get some entertainment", "eat, sightsee and get entertainment", "shop and eat"
 
 IMPORTANT: 
-- If the request specifies activity types (like "eat", "sightsee", "shop", "dining", "sightseeing") AND mentions a budget, it is NOT vague, even if location is not explicitly mentioned in the text.
-- If the request only mentions a location and asks for a plan/itinerary without specific activities, it IS vague.
-- Location is helpful but NOT required if activities and budget are specified.
+- If the request mentions ANY activity types/categories (even just one like "eat" or "get entertainment"), it is NOT vague.
+- Phrases like "get entertainment", "get some entertainment", "entertainment" all indicate the user wants entertainment activities.
+- If the request specifies activity types, it is NOT vague, even if location is not explicitly mentioned.
+- Budget mention is helpful but NOT required - activity types alone make it NOT vague.
 
 Return ONLY valid JSON:
 {
@@ -839,26 +847,45 @@ def dispatch_intent(user_request: str, sender: str, conversation_state: Optional
                 return {"type": "error", "data": {"error": "Failed to finalize activity list"}}
         
         # STEP 1: New request - check if vague
-        vagueness_result = check_vagueness(user_request)
-        print(f"Vagueness check result: {vagueness_result}")  # Debug logging
-        
-        # Check if request is vague
-        is_vague = vagueness_result.get("is_vague", False)
-        location = vagueness_result.get("location")
-        
         # Ensure user_request is a string before string operations
         if not isinstance(user_request, str):
             user_request = str(user_request)
         
-        # Check if request mentions specific activity types (not vague if activities are specified)
-        activity_keywords = ["eat", "dining", "sightsee", "sightseeing", "shop", "shopping", "entertainment", 
-                            "museum", "gallery", "park", "adventure", "outdoor", "cultural", "relax", "spa"]
-        has_activities = any(keyword in user_request.lower() for keyword in activity_keywords)
+        # FIRST: Check if request mentions specific activity types BEFORE calling AI vagueness check
+        # This avoids unnecessary AI calls and ensures activities are always detected
+        # Expanded list to catch more variations including "get entertainment", "get some entertainment"
+        activity_keywords = [
+            "eat", "dining", "food", "restaurant", "meal", "cafe",
+            "sightsee", "sightseeing", "sights", "landmarks", "monuments", "museums",
+            "shop", "shopping", "markets", "boutiques",
+            "entertainment", "get entertainment", "get some entertainment", "shows", "concerts", "nightlife", "bars", "clubs", "theater",
+            "outdoor", "parks", "hiking", "nature",
+            "cultural", "art", "galleries", "history",
+            "relax", "spa", "wellness", "adventure"
+        ]
+        user_request_lower = user_request.lower()
+        has_activities = any(keyword in user_request_lower for keyword in activity_keywords)
         
-        # If activities are specified, override the vagueness check - request is NOT vague
+        # If activities are specified, skip vagueness check entirely - request is NOT vague
         if has_activities:
+            print(f"Request has activities specified ({[kw for kw in activity_keywords if kw in user_request_lower]}), skipping vagueness check - NOT vague")
             is_vague = False
-            print(f"Request has activities specified, overriding vagueness check - not vague")
+            # Still try to extract location for use later
+            import re
+            location_match = re.search(r'\b(?:in|at|to|visit|trip to|going to|Location:)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)', user_request, re.IGNORECASE)
+            location = location_match.group(1) if location_match else None
+            # Also check for location in parentheses like "(Location: Rhode Island)"
+            if not location:
+                location_match = re.search(r'\(Location:\s*([^)]+)\)', user_request, re.IGNORECASE)
+                location = location_match.group(1).strip() if location_match else None
+        else:
+            # No activities detected, check with AI vagueness check
+            vagueness_result = check_vagueness(user_request)
+            print(f"Vagueness check result: {vagueness_result}")  # Debug logging
+            
+            # Check if request is vague
+            is_vague = vagueness_result.get("is_vague", False)
+            location = vagueness_result.get("location")
         
         # Also check if this looks like a general planning request (contains words like "plan", "itinerary", "day in")
         is_planning_request = any(word in user_request.lower() for word in ["plan", "itinerary", "day in", "visit", "trip to"])
@@ -887,16 +914,35 @@ def dispatch_intent(user_request: str, sender: str, conversation_state: Optional
             else:
                 # STEP 2a: Extract basic info (budget, times) from the vague request
                 try:
+                    budget_extract_prompt = f"""Extract the budget amount, start_time, and end_time from this user request. Look for dollar amounts, numbers with $, or phrases like "spend around X$", "budget of X", "X dollars".
+
+User request: {user_request}
+
+Return ONLY valid JSON:
+{{
+  "budget": number or null,
+  "start_time": "ISO 8601 datetime string or null",
+  "end_time": "ISO 8601 datetime string or null"
+}}
+
+Examples:
+- "spend around 400$" -> {{"budget": 400, "start_time": null, "end_time": null}}
+- "budget of 500" -> {{"budget": 500, "start_time": null, "end_time": null}}
+- "spend 300 dollars" -> {{"budget": 300, "start_time": null, "end_time": null}}
+- "I have 200$" -> {{"budget": 200, "start_time": null, "end_time": null}}
+"""
                     initial_parse = client.chat.completions.create(
                         model="asi1-mini",
                         messages=[
-                            {"role": "system", "content": "Extract budget, start_time, and end_time from: " + user_request + "\nReturn JSON: {\"budget\": number or null, \"start_time\": \"ISO 8601 datetime string or null\", \"end_time\": \"ISO 8601 datetime string or null\"}"},
-                            {"role": "user", "content": user_request},
+                            {"role": "system", "content": "You are a data extraction assistant. Extract budget, start_time, and end_time from user requests."},
+                            {"role": "user", "content": budget_extract_prompt},
                         ],
-                        max_tokens=150,
+                        max_tokens=200,
                     )
                     basic_info = safe_json_parse(initial_parse.choices[0].message.content)
-                except:
+                    print(f"Extracted basic info: {basic_info}")
+                except Exception as e:
+                    print(f"Error extracting basic info: {e}")
                     basic_info = {"budget": None, "start_time": None, "end_time": None}
                 
                 # STEP 2b: Check user's transaction history to infer preferences
@@ -1007,17 +1053,64 @@ def dispatch_intent(user_request: str, sender: str, conversation_state: Optional
                         }
         else:
             # REQUEST IS NOT VAGUE: User provided enough detail, proceed with normal dispatch
+            # First, extract budget from the user request if not already provided
+            extracted_budget = None
+            try:
+                # Try to extract budget from user_request text
+                budget_extract_prompt = f"""Extract the budget amount from this user request. Look for dollar amounts, numbers with $, or phrases like "spend around X$", "budget of X", "X dollars".
+
+User request: {user_request}
+
+Return ONLY valid JSON:
+{{
+  "budget": number or null
+}}
+
+Examples:
+- "spend around 400$" -> {{"budget": 400}}
+- "budget of 500" -> {{"budget": 500}}
+- "spend 300 dollars" -> {{"budget": 300}}
+- "I have 200$" -> {{"budget": 200}}
+"""
+                budget_response = client.chat.completions.create(
+                    model="asi1-mini",
+                    messages=[
+                        {"role": "system", "content": "You are a budget extraction assistant. Extract budget amounts from user requests."},
+                        {"role": "user", "content": budget_extract_prompt},
+                    ],
+                    max_tokens=100,
+                )
+                budget_data = safe_json_parse(budget_response.choices[0].message.content)
+                extracted_budget = budget_data.get("budget")
+                if extracted_budget:
+                    print(f"Extracted budget from user request: {extracted_budget}")
+            except Exception as e:
+                print(f"Error extracting budget: {e}")
+                extracted_budget = None
+            
+            # Create enhanced prompt that includes extracted budget
+            enhanced_user_request = user_request
+            if extracted_budget:
+                enhanced_user_request = f"{user_request}\n\nNote: Budget is ${extracted_budget}"
+            
             # This creates activity list with GENERAL categories (eat, sightsee, etc.) directly
             response = client.chat.completions.create(
                 model="asi1-mini",
                 messages=[
                     {"role": "system", "content": DISPATCHER_SYSTEM_PROMPT},
-                    {"role": "user", "content": user_request},
+                    {"role": "user", "content": enhanced_user_request},
                 ],
                 max_tokens=600,
             )
             raw_json = response.choices[0].message.content
             dispatch_plan = safe_json_parse(raw_json)
+            
+            # Ensure extracted budget is included in constraints if not already present
+            if extracted_budget and dispatch_plan.get("constraints"):
+                if not dispatch_plan["constraints"].get("budget"):
+                    dispatch_plan["constraints"]["budget"] = float(extracted_budget)
+                    print(f"Added extracted budget to dispatch plan: {extracted_budget}")
+            
             # Return dispatch plan with GENERAL categories (eat, sightsee, shop, etc.)
             return {"type": "dispatch_plan", "data": dispatch_plan}
             

@@ -277,13 +277,16 @@ async def handle_message(ctx: Context, sender: str, msg: ChatMessage):
                     location_from_json = parsed.get("location", "")
                     start_time_from_json = parsed.get("start_time")
                     end_time_from_json = parsed.get("end_time")
+                    budget_from_json = parsed.get("budget")
                     
                     # Store JSON values for later use
                     ctx.storage.set(f"json_location_{ctx.session}", location_from_json)
                     ctx.storage.set(f"json_start_time_{ctx.session}", start_time_from_json)
                     ctx.storage.set(f"json_end_time_{ctx.session}", end_time_from_json)
+                    if budget_from_json is not None:
+                        ctx.storage.set(f"json_budget_{ctx.session}", budget_from_json)
                     
-                    ctx.logger.info(f"Parsed JSON input: location={location_from_json}, start_time={start_time_from_json}, end_time={end_time_from_json}")
+                    ctx.logger.info(f"Parsed JSON input: location={location_from_json}, start_time={start_time_from_json}, end_time={end_time_from_json}, budget={budget_from_json}")
                     ctx.logger.info(f"Using user_request for intent extraction: {message_text}")
             except (json.JSONDecodeError, ValueError):
                 # Not JSON format, use text as-is
@@ -356,6 +359,10 @@ async def handle_structured_output_response(
     try:
         intent_data = msg.output if isinstance(msg.output, dict) else {}
         
+        # Initialize variables for extracting data from structured output
+        structured_budget = None
+        user_request = ""
+        
         # Check if we got the schema structure with data in 'properties'
         # Some structured output returns: {'type': 'object', 'properties': {'user_request': '...', ...}}
         if intent_data.get("type") == "object" and "properties" in intent_data:
@@ -364,6 +371,9 @@ async def handle_structured_output_response(
             if isinstance(properties, dict) and "user_request" in properties:
                 # Data is nested in properties - extract it
                 user_request = properties.get("user_request", "")
+                structured_budget = properties.get("budget")
+                if structured_budget is not None:
+                    ctx.logger.info(f'Extracted budget from properties: ${structured_budget}')
                 ctx.logger.info(f'Extracted data from properties field: {user_request}')
             else:
                 # It's actually a schema definition, use original message
@@ -383,33 +393,51 @@ async def handle_structured_output_response(
                 if not user_request:
                     user_request = str(msg.output)
             
-            # Check for JSON values (from JSON input format)
-            json_location = ctx.storage.get(f"json_location_{ctx.session}")
-            json_start_time = ctx.storage.get(f"json_start_time_{ctx.session}")
-            json_end_time = ctx.storage.get(f"json_end_time_{ctx.session}")
-            
-            # Check if we extracted times from the text and use them if structured output didn't provide times
-            extracted_start_time = ctx.storage.get(f"extracted_start_time_{ctx.session}")
-            extracted_end_time = ctx.storage.get(f"extracted_end_time_{ctx.session}")
-            
-            # Prefer JSON values over extracted times
-            start_time_to_use = json_start_time or extracted_start_time
-            end_time_to_use = json_end_time or extracted_end_time
-            
-            # Always use location from JSON input if available (prioritize JSON location)
-            if json_location:
-                # Always add location from JSON to user_request
-                user_request = f"{user_request} (Location: {json_location})"
-                ctx.logger.info(f'Using location from JSON input: {json_location}')
-            
-            # If times were available and not in structured output, add them to user_request
-            if (start_time_to_use or end_time_to_use) and not intent_data.get("start_time") and not intent_data.get("end_time"):
-                ctx.logger.info(f'Using times: start_time={start_time_to_use}, end_time={end_time_to_use}')
-                # Append time information to user_request so dispatch_intent can use it
-                if start_time_to_use and end_time_to_use:
-                    user_request = f"{user_request} (Time: {start_time_to_use} to {end_time_to_use})"
-                elif start_time_to_use:
-                    user_request = f"{user_request} (Start time: {start_time_to_use})"
+        # Extract budget from structured output if not already extracted from properties
+        if structured_budget is None:
+            structured_budget = intent_data.get("budget")
+            if structured_budget is not None:
+                ctx.logger.info(f'Extracted budget from structured output: ${structured_budget}')
+        
+        # Check for JSON values (from JSON input format)
+        json_location = ctx.storage.get(f"json_location_{ctx.session}")
+        json_start_time = ctx.storage.get(f"json_start_time_{ctx.session}")
+        json_end_time = ctx.storage.get(f"json_end_time_{ctx.session}")
+        json_budget = ctx.storage.get(f"json_budget_{ctx.session}")
+        
+        # Check if we extracted times from the text and use them if structured output didn't provide times
+        extracted_start_time = ctx.storage.get(f"extracted_start_time_{ctx.session}")
+        extracted_end_time = ctx.storage.get(f"extracted_end_time_{ctx.session}")
+        
+        # Prefer JSON values over extracted times
+        start_time_to_use = json_start_time or extracted_start_time
+        end_time_to_use = json_end_time or extracted_end_time
+        
+        # Determine budget to use: prioritize JSON budget, then structured output budget
+        budget_to_use = json_budget if json_budget is not None else structured_budget
+        
+        # Always use location from JSON input if available (prioritize JSON location)
+        if json_location:
+            # Always add location from JSON to user_request
+            user_request = f"{user_request} (Location: {json_location})"
+            ctx.logger.info(f'Using location from JSON input: {json_location}')
+        
+        # Add budget to user_request if available (from JSON or structured output)
+        if budget_to_use is not None:
+            user_request = f"{user_request} (Budget: ${budget_to_use})"
+            ctx.logger.info(f'Using budget: ${budget_to_use} (source: {"JSON" if json_budget is not None else "structured output"})')
+        
+        # Store budget for later use in dispatch plan
+        ctx.storage.set(f"extracted_budget_{ctx.session}", budget_to_use)
+        
+        # If times were available and not in structured output, add them to user_request
+        if (start_time_to_use or end_time_to_use) and not intent_data.get("start_time") and not intent_data.get("end_time"):
+            ctx.logger.info(f'Using times: start_time={start_time_to_use}, end_time={end_time_to_use}')
+            # Append time information to user_request so dispatch_intent can use it
+            if start_time_to_use and end_time_to_use:
+                user_request = f"{user_request} (Time: {start_time_to_use} to {end_time_to_use})"
+            elif start_time_to_use:
+                user_request = f"{user_request} (Start time: {start_time_to_use})"
             
             ctx.logger.info(f'Processing intent request: {user_request}')
             
@@ -433,7 +461,7 @@ async def handle_structured_output_response(
                 await safe_send(ctx, session_sender, error_msg)
                 return
             
-            # Update dispatch plan with JSON values (location, start_time, end_time)
+            # Update dispatch plan with JSON values (location, start_time, end_time, budget)
             if result.get("type") == "dispatch_plan":
                 dispatch_data = result.get("data", {})
                 constraints = dispatch_data.get("constraints", {})
@@ -452,6 +480,18 @@ async def handle_structured_output_response(
                     constraints["end_time"] = end_time_to_use
                     ctx.logger.info(f'Added end_time to dispatch plan: {end_time_to_use}')
                 
+                # Add budget if available and not already in constraints (from JSON, structured output, or extracted)
+                extracted_budget = ctx.storage.get(f"extracted_budget_{ctx.session}")
+                budget_to_add = json_budget if json_budget is not None else extracted_budget
+                
+                if budget_to_add is not None and not constraints.get("budget"):
+                    constraints["budget"] = float(budget_to_add)
+                    ctx.logger.info(f'Added budget to dispatch plan: ${budget_to_add} (source: {"JSON" if json_budget is not None else "structured output/extracted"})')
+                elif constraints.get("budget"):
+                    ctx.logger.info(f'Budget already in dispatch plan: ${constraints.get("budget")}')
+                else:
+                    ctx.logger.warning(f'No budget found - json_budget={json_budget}, extracted_budget={extracted_budget}, constraints.budget={constraints.get("budget")}')
+                
                 dispatch_data["constraints"] = constraints
                 result["data"] = dispatch_data
         
@@ -460,8 +500,17 @@ async def handle_structured_output_response(
             await safe_send(ctx, session_sender, create_text_chat(error_msg))
         elif result["type"] == "clarification_needed":
             # Store conversation state for next message
-            ctx.storage.set(conversation_state_key, result["data"]["conversation_state"])
-            await safe_send(ctx, session_sender, create_text_chat(result["data"]["prompt"], end_session=False))
+            conversation_state_to_store = result["data"]["conversation_state"]
+            ctx.storage.set(conversation_state_key, conversation_state_to_store)
+            
+            # Send clarification prompt as JSON so orchestrator can extract conversation_state
+            # Format: {"type": "clarification_needed", "prompt": "...", "conversation_state": {...}}
+            clarification_response = {
+                "type": "clarification_needed",
+                "prompt": result["data"]["prompt"],
+                "conversation_state": conversation_state_to_store
+            }
+            await safe_send(ctx, session_sender, create_text_chat(json.dumps(clarification_response, indent=2), end_session=False))
         elif result["type"] == "dispatch_plan":
             # Clear conversation state if it exists (set to None to clear it)
             if conversation_state:
