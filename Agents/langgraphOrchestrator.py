@@ -772,8 +772,16 @@ async def call_budget_filter_node(state: OrchestratorState, ctx: Context) -> Orc
                 except Exception as gemini_err:
                     ctx.logger.error(f"[Budget Filter] Exception in Gemini fallback: {gemini_err}")
             
-            # If fallback failed or not available, set error
-            state["budget_filter_response"] = {"error": "Cannot filter due to agent errors and Gemini fallback unavailable/failed"}
+            # If fallback failed or not available, set error with actual agent details
+            fund_err = fund_allocation.get("error", "Unknown")
+            events_err = events_scraper.get("error", "Unknown")
+            state["budget_filter_response"] = {
+                "error": (
+                    f"Fund allocation and events scraper both failed. "
+                    f"Fund allocation: {fund_err}. Events scraper: {events_err}. "
+                    "Gemini fallback unavailable or also failed."
+                )
+            }
             return state
         elif fund_allocation.get("error") or events_scraper.get("error"):
             ctx.logger.warning("One agent returned error, attempting budget filter with available data")
