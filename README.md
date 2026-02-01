@@ -31,8 +31,8 @@ We are very proud of what we've accomplished at Hack at Brown! While our project
 # What we learned 
 Our team gained a plethrora of experience in developing Agentic workflows, such as those offered by Fetch.AI's AgentVerse and ASI tools. On a more ground-level basis, our team learned through trial and error that we have to save our local copies to GitHub very frequently, and not wait until all features are fully developed before doing so. This experience made us far more systematic and methodical programmers, and made us much more aware of the importance of ensuring redundancy both within our code and the process we used to code it. 
 
-# Roadmap
- later down the line, we’ll be able to grow our solution by using the Intelligent Commerce API, which would allow us to properly perform the transactions.
+# What's next for Team VISOR
+Later down the line, we’ll be able to grow our solution by using the Intelligent Commerce API, which would allow us to implement more seamless transactions in the near future. 
 
  
 
