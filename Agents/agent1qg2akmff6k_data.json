@@ -2,9 +2,9 @@
     "conversation_state_agent1qfsuxw6yaz223jppu974lf2kyuznqeruvy3rnu0pw3m6acmtmxmq7c5yz7k": null,
     "conversation_state_agent1qdag7q4nawz3lplyhqv8pkslsxggxsuf5n5m866826f62frl4ypt5zn02rz": {
         "waiting_for_clarification": true,
-        "original_request": "{\"type\": \"error\", \"message\": \"Unable to parse input string into valid JSON.\\nExpected formats:\\n 1. EventScraperAgent: {\\\"location\\\": \\\"...\\\", \\\"interest_activities\\\": [...], \\\"budget\\\": 500}\\n 2. FundAllocationAgent: {\\\"location\\\": \\\"...\\\", \\\"activities\\\": [...], \\\"budget\\\": 500}\\n 3. Both wrapped: {\\\"events\\\": {...}, \\\"fund\\\": {...}}\", \"received_text\": \"Error processing request: 'NoneType' object has no attribute 'get'\", \"hint\": \"Send JSON from EventScraperAgent or FundAllocationAgent\"} (Location: parse input string into valid JSON) (Budget: $0)",
+        "original_request": "{\"location\": \"parse input string into valid JSON\", \"budget\": 200.0, \"interest_activities\": [], \"activities\": {}, \"total_cost\": 0.0, \"remaining_budget\": 200.0, \"summary\": {\"total_activities\": 0, \"total_cost\": 0.0, \"remaining_budget\": 200.0}} (Location: parse input string into valid JSON) (Budget: $200.0)",
         "location": "parse input string into valid JSON",
-        "budget": "None",
+        "budget": "200.0",
         "start_time": "2026-02-01T09:21:00.000Z",
         "end_time": "2026-02-01T23:21:00.000Z",
         "categories": [

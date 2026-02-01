@@ -1,0 +1,52 @@
+// Simple inline backup implementation
+// Add this code inside the handleSearch function's try block
+
+// Wrap the API call with timeout and backup fallback
+const controller = new AbortController();
+const timeoutId = setTimeout(() => controller.abort(), 10000);
+
+try {
+  // Original API call code with signal added
+  const response = await fetch('http://localhost:8005/api/schedule', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      user_request: chatInput,
+      location: location,
+      start_time: startTimeISO,
+      end_time: endTimeISO
+    }),
+    signal: controller.signal  // ADD THIS LINE
+  });
+  
+  clearTimeout(timeoutId);
+  
+  // Rest of original code...
+  if (!response.ok) throw new Error(`API error: ${response.statusText}`);
+  const result = await response.json();
+  if (!result.success) throw new Error(result.error || 'Unknown error');
+  
+  const { recommendations, transitInfo: transit } = await transformBackendResponse(result.data);
+  setApiRecommendations(recommendations);
+  setTransitInfo(transit);
+  if (result.data?.budget) setApiBudget(result.data.budget);
+  if (recommendations.length > 0) setViewState('RESULTS');
+  else throw new Error('No activities found');
+  
+} catch (fetchError) {
+  clearTimeout(timeoutId);
+  
+  // BACKUP FALLBACK
+  console.warn('API failed, using backup:', fetchError);
+  const { recommendations, transitInfo: transit } = await transformBackendResponse(backupProvidenceData);
+  setApiRecommendations(recommendations);
+  setTransitInfo(transit);
+  if (backupProvidenceData.budget) setApiBudget(backupProvidenceData.budget);
+  
+  const isTimeout = fetchError instanceof Error && fetchError.name === 'AbortError';
+  setError(isTimeout ? '⚠️ API timeout - showing Providence sample' : '⚠️ API unavailable - showing Providence sample');
+  setTimeout(() => setError(null), 5000);
+  
+  if (recommendations.length > 0) setViewState('RESULTS');
+  else throw new Error('Backup data invalid');
+}

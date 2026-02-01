@@ -126,7 +126,7 @@ class LoginManager:
         Returns:
             Tuple of (success: bool, message: str)
         """
-        if not self.db:
+        if self.db is None:
             return False, "Database connection failed"
         
         # Validate inputs
@@ -158,8 +158,10 @@ class LoginManager:
                 "created_at": datetime.utcnow(),
                 "updated_at": datetime.utcnow(),
                 "is_active": True,
+                "onboarding_completed": False,
                 "preferences": {
                     "activity_categories": [],
+                    "favorite_stores": [],
                     "budget_range": None
                 }
             }
@@ -186,7 +188,7 @@ class LoginManager:
         Returns:
             Tuple of (success: bool, message: str, session_token: Optional[str])
         """
-        if not self.db:
+        if self.db is None:
             return False, "Database connection failed", None
         
         try:
@@ -256,7 +258,7 @@ class LoginManager:
         Returns:
             Tuple of (is_valid: bool, user_data: Optional[Dict])
         """
-        if not self.db:
+        if self.db is None:
             return False, None
         
         try:
@@ -303,7 +305,7 @@ class LoginManager:
         Returns:
             True if logout successful, False otherwise
         """
-        if not self.db:
+        if self.db is None:
             return False
         
         try:
@@ -324,7 +326,7 @@ class LoginManager:
         Returns:
             User profile dict or None if not found
         """
-        if not self.db:
+        if self.db is None:
             return None
         
         try:
@@ -345,6 +347,7 @@ class LoginManager:
                 "created_at": user["created_at"].isoformat(),
                 "last_login": user.get("last_login", "Never").isoformat() if isinstance(user.get("last_login"), datetime) else "Never",
                 "preferences": user.get("preferences", {}),
+                "onboarding_completed": user.get("onboarding_completed", False),
                 "is_active": user.get("is_active", True)
             }
             
@@ -358,26 +361,38 @@ class LoginManager:
         
         Args:
             user_id: MongoDB ObjectId as string
-            preferences: Dict with preference updates (e.g., activity_categories, budget_range)
+            preferences: Dict with preference updates (e.g., activity_categories, favorite_stores, budget_range, onboarding_completed)
         
         Returns:
             Tuple of (success: bool, message: str)
         """
-        if not self.db:
+        if self.db is None:
             return False, "Database connection failed"
         
         try:
             from bson.objectid import ObjectId
             users_collection = self.db["users"]
             
+            # Separate onboarding_completed from preferences if present
+            update_data = {"updated_at": datetime.utcnow()}
+            
+            if "onboarding_completed" in preferences:
+                update_data["onboarding_completed"] = preferences.pop("onboarding_completed")
+            
+            # Update preferences
+            if preferences:
+                # Merge with existing preferences
+                user = users_collection.find_one({"_id": ObjectId(user_id)})
+                if user:
+                    existing_prefs = user.get("preferences", {})
+                    existing_prefs.update(preferences)
+                    update_data["preferences"] = existing_prefs
+                else:
+                    update_data["preferences"] = preferences
+            
             result = users_collection.update_one(
                 {"_id": ObjectId(user_id)},
-                {
-                    "$set": {
-                        "preferences": preferences,
-                        "updated_at": datetime.utcnow()
-                    }
-                }
+                {"$set": update_data}
             )
             
             if result.matched_count == 0:
@@ -391,7 +406,7 @@ class LoginManager:
     
     def _log_login_attempt(self, user_id, success: bool):
         """Log login attempts for security tracking"""
-        if not self.db:
+        if self.db is None:
             return
         
         try:
@@ -420,7 +435,7 @@ class LoginManager:
         if not GOOGLE_AUTH_AVAILABLE:
             return False, "Google authentication not available", None
         
-        if not self.db:
+        if self.db is None:
             return False, "Database connection failed", None
         
         try:
@@ -473,8 +488,10 @@ class LoginManager:
                         "created_at": datetime.utcnow(),
                         "updated_at": datetime.utcnow(),
                         "is_active": True,
+                        "onboarding_completed": False,
                         "preferences": {
                             "activity_categories": [],
+                            "favorite_stores": [],
                             "budget_range": None
                         }
                     }
@@ -540,7 +557,7 @@ class LoginManager:
         if not GOOGLE_AUTH_AVAILABLE:
             return False, "Google authentication not available"
         
-        if not self.db:
+        if self.db is None:
             return False, "Database connection failed"
         
         try:

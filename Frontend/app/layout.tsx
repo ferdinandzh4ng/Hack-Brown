@@ -7,8 +7,8 @@ const plusJakartaSans = Plus_Jakarta_Sans({ subsets: ['latin'], variable: '--fon
 const jetbrainsMono = JetBrains_Mono({ subsets: ['latin'], variable: '--font-mono' });
 
 export const metadata: Metadata = {
-  title: 'Visa Intelligent Commerce | Spend in Your Community',
-  description: 'AI-powered, cashless spending in your community. Secure. Premium. Agentic.',
+  title: 'Helping Hand — Powered by Visa Intelligence',
+  description: 'Helping Hand: AI-powered discovery and recommendations in your community. Secure. Premium.',
 };
 
 export const viewport: Viewport = {
