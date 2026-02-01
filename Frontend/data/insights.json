@@ -1,40 +1,26 @@
 {
-  "recommendations": [
+  "itineraries": [
     {
-      "id": "rec-1",
-      "title": "Downtown Farmers Market",
-      "subtitle": "Community Event · 15+ local farmers",
-      "type": "Community Event",
-      "impact": "Supports 15+ Local Farmers",
-      "cost": "$12.50",
-      "score": 94,
-      "agent_reasoning": "Matches your interest in Sustainable Living. 124 Visa users in West Lafayette verified. Community Insights: farmers markets here prefer digital—saves ~4 min vs cash.",
-      "cash_vs_digital": "Saves ~4 min vs cash checkout",
-      "badges": ["COMMUNITY", "TRUSTED", "DIGITAL-FIRST"]
+      "group_name": "The Academic Path",
+      "items": [
+        { "id": "1", "title": "Lippitt Park Market", "cost": "$15.00", "startTime": "09:00", "endTime": "10:30", "coordinates": [-71.3960, 41.8480] },
+        { "id": "3", "title": "Brown Bookstore", "cost": "$45.00", "startTime": "11:30", "endTime": "12:30", "coordinates": [-71.4035, 41.8268] },
+        { "id": "4", "title": "Blue State Coffee", "cost": "$5.50", "startTime": "12:45", "endTime": "13:30", "coordinates": [-71.4002, 41.8275] }
+      ]
     },
     {
-      "id": "rec-2",
-      "title": "Greyhouse Coffee Supply",
-      "subtitle": "Local Merchant · Ethically sourced",
-      "type": "Local Merchant",
-      "impact": "Ethically Sourced Beans",
-      "cost": "$6.75",
-      "score": 98,
-      "agent_reasoning": "You've visited 3 times this month. High reliability score. Contactless usage up 40% here—no card handoff, secure tap.",
-      "cash_vs_digital": "Earn 3% more value than cash with Visa offers",
-      "badges": ["FAVORITE", "REWARDS", "SECURE"]
+      "group_name": "Arts & Culture",
+      "items": [
+        { "id": "5", "title": "RISD Museum", "cost": "$10.00", "startTime": "13:45", "endTime": "15:15", "coordinates": [-71.4075, 41.8265] },
+        { "id": "7", "title": "Providence Flea Market", "cost": "$25.00", "startTime": "10:00", "endTime": "12:00", "coordinates": [-71.4050, 41.8190] }
+      ]
     },
     {
-      "id": "rec-3",
-      "title": "Purdue Union — Campus Vendors",
-      "subtitle": "Campus · Cashless preferred",
-      "type": "Campus",
-      "impact": "Campus dining & retail",
-      "cost": "$8.00",
-      "score": 96,
-      "agent_reasoning": "312 Visa users nearby. Campus is digital-first; cashless preferred. Aligns with your local & community focus.",
-      "cash_vs_digital": "No cash handling—tap and go",
-      "badges": ["CAMPUS", "CASHLESS", "TRUSTED"]
+      "group_name": "Evening Social",
+      "items": [
+        { "id": "6", "title": "The Malted Barley", "cost": "$18.00", "startTime": "15:30", "endTime": "16:30", "coordinates": [-71.4110, 41.8235] },
+        { "id": "10", "title": "Den Den Chicken", "cost": "$22.00", "startTime": "18:00", "endTime": "19:30", "coordinates": [-71.4010, 41.8285] }
+      ]
     }
   ]
 }
