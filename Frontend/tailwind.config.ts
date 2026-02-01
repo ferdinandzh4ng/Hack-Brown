@@ -11,6 +11,9 @@ const config: Config = {
         'visa-blue': '#003399',
         'visa-gold': '#F7B600',
         'visa-blue-dark': '#002266',
+        'slate-bg': '#f8fafc',
+        'slate-border': '#e2e8f0',
+        'slate-muted': '#64748b',
         'slate-trust': {
           50: '#f8fafc',
           100: '#f1f5f9',
