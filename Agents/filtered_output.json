@@ -1,0 +1,47 @@
+{
+  "location": "New York City",
+  "budget": 500.0,
+  "interest_activities": [
+    "sightseeing",
+    "dining",
+    "entertainment"
+  ],
+  "input_activities": [
+    "Visit the Statue of Liberty",
+    "Broadway show",
+    "Central Park bike rental",
+    "Metropolitan Museum of Art",
+    "Times Square sightseeing"
+  ],
+  "matched_activities": [
+    "Visit the Statue of Liberty",
+    "Broadway show",
+    "Times Square sightseeing"
+  ],
+  "filtered_selection": {
+    "selected_activities": [
+      {
+        "activity": "Visit the Statue of Liberty",
+        "cost": 150.0
+      },
+      {
+        "activity": "Broadway show",
+        "cost": 150.0
+      },
+      {
+        "activity": "Times Square sightseeing",
+        "cost": 150.0
+      }
+    ],
+    "transit_cost": 50.0,
+    "total_estimated_cost": 500.0,
+    "remaining_budget": 0.0
+  },
+  "summary": {
+    "total_input_activities": 5,
+    "matched_to_interests": 3,
+    "selected_within_budget": 3,
+    "total_cost": 500.0,
+    "remaining_budget": 0.0
+  }
+}
