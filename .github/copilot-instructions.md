@@ -2,100 +2,155 @@
 
 ## Architecture Overview
 
-**Hack-Brown** is an agentic travel planning system built on the **uagents framework**. It uses an intent-based dispatch pattern where user travel requests flow through a chain of specialized agents.
+**Hack-Brown** is an agentic travel planning system built on **uagents framework**. Core design: user travel requests → intent parsing → clarification/research if needed → structured dispatch plan with activity categories.
 
-### Core Flow
-1. **AgentCity Intent Dispatcher** (`agents.py`) - Main entry point listening on Chat Protocol
-2. **Structured Output** - Uses AI agent to parse user intent into `IntentRequest` model
-3. **Intent Processing** (`functions.py`) - Analyzes request, manages conversation state
-4. **Response Types** - Returns dispatch plan, clarification prompt, or error
+### Core Message Flow
+1. **User sends Chat Protocol message** to `agents.py`
+2. **Structured Output Protocol** extracts raw intent via ASI-1 AI agent (address: `agent1qtlpfshtlcxekgrfcpmv7m9zpajuwu7d5jfyachvpa4u3dkt6k0uwwp2lct`)
+3. **`dispatch_intent()`** determines: vague request → clarification workflow OR sufficient data → dispatch plan
+4. **Response types**: `{"type": "dispatch_plan"|"clarification_needed"|"error", "data": {...}}`
 
 ### Key Components
 
-- **[agents.py](Agents/agents.py)**: Main agent hosting on Agentverse. Handles Chat Protocol messages, sends to AI for structured extraction, processes responses. Uses session-based storage.
-- **[functions.py](Agents/functions.py)**: Business logic hub. Contains vagueness detection, location research, transaction analysis, and activity finalization.
-- **MongoDB Integration**: Optional transaction history analysis for personalized recommendations (connection string via env vars).
-- **ASI-1 AI API**: Used for NLP tasks (vagueness check, transaction analysis, activity finalization).
+- **[agents.py](Agents/agents.py)**: Runs on Agentverse (port 8001). Receives Chat Protocol messages, forwards to structured output AI, processes responses via `dispatch_intent()`. Session-based state in `ctx.storage`.
+- **[functions.py](Agents/functions.py)**: Intent dispatch logic. Three main functions: `check_vagueness()`, `research_location_activities()`, `finalize_activity_list()`.
+- **MongoDB** (optional): Analyzes user transaction history to infer activity preferences when planning similar trips.
+- **ASI-1 AI API**: NLP backend for vagueness detection, transaction analysis, and activity list generation. Uses `openai` client pointed to `https://api.asi1.ai/v1`.
 
 ## Critical Patterns
 
-### Intent Processing Pipeline
-The `dispatch_intent()` function handles three paths:
+### The Vague Request Workflow (Most Important Flow)
+When user request is vague (e.g., "Plan me a day in Paris"), `dispatch_intent()` executes this multi-step flow:
 
-1. **Vague Request Detection** → Clarification Workflow
-   - `check_vagueness()` determines if location is extractable
-   - If vague: research activities via `research_location_activities()`, prompt user for preferences
-   - Stores conversation state in `ctx.storage` with `waiting_for_clarification` flag
+1. **Detect Vagueness**: `check_vagueness(user_request)` → returns `{"is_vague": bool, "location": str, "reason": str}`
+2. **Extract Basics**: Parse budget/times from request via ASI-1
+3. **Check Transaction History**: `analyze_transaction_preferences(user_transactions, location)` → infers past preferences
+   - If sufficient data (3+ similar activities): **skip clarification**, finalize activity list directly using inferred preferences
+   - If insufficient data: continue to step 4
+4. **Research Location**: `research_location_activities(location)` → returns `{"general_categories": [...]}`
+5. **Prompt User**: `create_preference_prompt(categories)` → asks user to select from 6 category types (eat, sightsee, shop, entertainment, outdoor, cultural)
+6. **Store Conversation State**: Save in `ctx.storage[conversation_state_{sender_address}]` with `waiting_for_clarification: True`
+7. **Next Message**: User responds (e.g., "1, 3, 5" or "eat, sightsee") → `dispatch_intent()` detects `waiting_for_clarification` flag, calls `finalize_activity_list()`
+8. **Return Dispatch Plan**: Activity list with GENERAL categories (not specific venues)
 
-2. **Transaction-Based Personalization**
-   - `get_user_transactions()` fetches user history from MongoDB
-   - `analyze_transaction_preferences()` infers activity patterns from past spending
-   - If sufficient data (3+ similar activities), skips clarification and generates plan directly
+**Key invariant**: All `activity_list` entries must be general categories like "eat", "sightsee", "shop" — never specific venue names.
 
-3. **Direct Dispatch**
-   - Non-vague requests proceed directly to activity finalization
+### Non-Vague Request Path
+User provides enough detail (e.g., "Book me a museum visit in Paris tomorrow afternoon") → skip to direct `finalize_activity_list()` → return dispatch plan immediately.
 
-### Conversation State Management
-- Stored in `ctx.storage` with key `conversation_state_{sender_address}`
-- Persists: original request, extracted location/budget/time, research categories, transaction data
-- Cleared after successful dispatch plan generation
+### JSON Response Validation Critical Details
+- `safe_json_parse()` handles malformed AI responses: extracts JSON from markdown blocks, balances braces, recovers partial responses
+- All prompts return ONLY JSON (no markdown wrapper expected in final response)
+- If parsing fails → fallback values extracted via regex (`activity_list` defaults to `["eat", "sightsee"]`)
 
-### Response Models
-- **IntentRequest**: Structured input extracted from user text (user_request, location, budget, times, preferences)
-- **IntentResponse**: Structured output containing activity_list, constraints, agents_to_call, notes
+### Conversation State Schema
+```
+conversation_state_{sender_address}: {
+  "waiting_for_clarification": True/False,
+  "original_request": str,
+  "location": str,
+  "budget": str (or "null"),
+  "start_time": str or "null",
+  "end_time": str or "null",
+  "categories": [{"category": str, "description": str, "examples": [str]}],
+  "transaction_data": {optional transaction analysis result}
+}
+```
 
-## Environment Configuration
+## Environment Configuration & Startup
 
 Required `.env` variables:
-- `AGENT_SEED_PHRASE` - Agent identity seed
-- `FETCH_API_KEY` - ASI-1 API credentials
-- `MONGODB_CONNECTION_STRING` OR (`MONGODB_USERNAME`, `MONGODB_PASSWORD`, `MONGODB_CLUSTER`, `MONGODB_DATABASE`)
+```
+AGENT_SEED_PHRASE=<your-seed>
+FETCH_API_KEY=<asi1-api-key>
+# MongoDB connection (either full string or components):
+MONGODB_CONNECTION_STRING=mongodb+srv://...  # OR individual components below:
+MONGODB_USERNAME=<username>
+MONGODB_PASSWORD=<password>
+MONGODB_CLUSTER=<cluster-name>
+MONGODB_DATABASE=HackBrown
+```
 
-Agent runs on **testnet** (no funds needed for registration). Default port: 8001.
+**Startup**:
+```bash
+cd Agents && python agents.py
+# Agent address printed to stdout; needed for mailbox setup on Agentverse
+```
 
-## Development Patterns
+Agent runs on **testnet** (no funds required). Listens on port 8001.
 
-### Adding New Intent Handlers
-1. Define new `check_*()` function in [functions.py](Agents/functions.py) following vagueness/research pattern
-2. Add logic in `dispatch_intent()` to branch on condition
-3. Return dict with `{"type": "...", "data": {...}}`
+## System Prompts (All in functions.py)
+These are NOT aspirational — they directly control AI behavior:
 
-### Modifying AI Prompts
-All system prompts are defined as constants in [functions.py](Agents/functions.py):
-- `VAGUENESS_CHECK_PROMPT` - JSON validation for vagueness detection
-- `RESEARCH_PROMPT` - Activity categories generation
-- `FINALIZE_PROMPT` - Personalized activity list creation
-- `DISPATCHER_SYSTEM_PROMPT` - Agent selection and dispatch logic
+- **VAGUENESS_CHECK_PROMPT**: Defines what constitutes a vague request. "Plan me a day in X" → vague. "Visit the Eiffel Tower" → not vague.
+- **RESEARCH_PROMPT**: Generates 4-6 activity categories for a location with examples. Response format must have `general_categories` array.
+- **FINALIZE_PROMPT**: Takes user preferences + location + budget/times → returns `activity_list` (general categories), `constraints`, `agents_to_call`, `notes`. **Must ensure `activity_list` is never empty**.
+- **DISPATCHER_SYSTEM_PROMPT**: Fallback for non-vague requests. Same output format as FINALIZE_PROMPT.
 
-**Important**: Prompts return ONLY valid JSON (no markdown, no extra text). Responses are immediately parsed with `json.loads()`.
+All prompts expect ONLY valid JSON responses. Markdown code blocks not accepted.
 
 ### Error Handling Strategy
 - All API calls wrapped in try/except with graceful degradation
-- Vagueness check failure → assume not vague
-- MongoDB errors → skip transaction analysis
-- AI response parsing failure → return error response type
-- Session not found → discard message with warning log
+- Vagueness check failure → assume not vague (proceeds with normal dispatch)
+- MongoDB errors → skip transaction analysis (continues to clarification if vague)
+- AI response parsing failure → `safe_json_parse()` extracts partial data or uses fallback values
+- Session not found → discard message with warning log (no user response sent)
+- Empty `activity_list` → automatic fallback to `["eat", "sightsee"]` (critical invariant maintained)
 
-## Common Workflows
+## Authentication & User Management
 
-### Debugging Intent Processing
-1. Check logs: `ctx.logger.info()` statements in `agents.py` trace message flow
-2. Inspect conversation state: Set breakpoint after `ctx.storage.get(conversation_state_key)`
-3. Validate JSON extraction: Print `msg.output` from structured output response
-4. Test AI parsing: Call `check_vagueness()` or `analyze_transaction_preferences()` directly
+### Login System ([Login.py](Agents/Login.py))
+**`LoginManager` class** handles user authentication with MongoDB and Google OAuth2:
 
-### Testing New Activity Categories
-- Modify `RESEARCH_PROMPT` to include new categories
-- Test via `research_location_activities("test_location")`
-- Verify returned JSON has `general_categories` array with category/description/examples
+**Traditional Authentication**:
+- **`register_user(email, username, password, full_name)`**: Creates new user with hashed password (SHA-256 + salt). Enforces unique email/username constraints, 6+ char password. Returns (success: bool, message: str).
+- **`login_user(username_or_email, password, remember_me)`**: Authenticates user, creates session token (30 days if remember_me=True, else 7 days). Returns (success: bool, message: str, token: str).
 
-### Adding Transaction Analysis
-- Ensure MongoDB has `transactions` collection with user_id index
-- Transaction schema: `{user_id, activity/name, category/type, amount, location, timestamp}`
-- Test via `analyze_transaction_preferences()` with mock transaction list
+**Google OAuth2 Sign-In**:
+- **`google_sign_in(google_token, remember_me)`**: Verifies Google OAuth2 ID token, creates or links user. Auto-creates user if first-time Google sign-in. Returns (success: bool, message: str, token: str).
+- **`link_google_account(session_token, google_token)`**: Links Google account to existing user. Allows users with traditional auth to add Google sign-in option.
 
-## eventsScaperAgent.py
-Currently empty placeholder. Intended for event-specific scraping logic (museum hours, event listings, etc.).
+**Session Management**:
+- **`verify_session(session_token)`**: Validates token against MongoDB sessions collection, checks expiry, updates last_activity. Returns (is_valid: bool, user_data: Dict).
+- **`logout_user(session_token)`**: Invalidates session by deleting token from DB.
+
+**User Profile**:
+- **`get_user_profile(user_id)`**: Retrieves user profile (email, username, preferences, created_at, last_login) without password hash.
+- **`update_user_preferences(user_id, preferences)`**: Updates user activity categories and budget preferences.
+
+**MongoDB Collections**:
+- `users`: email (unique), username (unique), password_hash (nullable for Google auth), full_name, google_id (for OAuth users), picture_url, auth_method, preferences, created_at, last_login, login_count, is_active
+- `sessions`: token (unique), user_id, auth_method, expires_at, last_activity, remember_me flag
+- `login_logs`: Audit trail of all login attempts (success/fail)
+
+**Password Security**: Uses SHA-256 with 16-byte random salt. Salt is prepended to hash as `salt$hash` format.
+
+**Environment Configuration**:
+```
+# Traditional auth (already configured)
+MONGODB_CONNECTION_STRING=mongodb+srv://...
+MONGODB_DATABASE=HackBrown
+
+# Google OAuth2 (add to .env for Google Sign-In)
+GOOGLE_CLIENT_ID=<your-google-client-id>  # Get from Google Cloud Console
+```
+
+**Frontend Integration Pattern**: 
+```python
+from Login import LoginManager
+login_mgr = LoginManager()
+
+# Traditional login
+success, msg, token = login_mgr.login_user(username, password)
+
+# Google sign-in (receive google_token from frontend after OAuth2 flow)
+success, msg, token = login_mgr.google_sign_in(google_token)
+```
+
+## Project Files Overview
+
+- **[Agents/budgetFilterAgent.py](Agents/budgetFilterAgent.py)**, **[fundAllocationAgent.py](Agents/fundAllocationAgent.py)**, **[eventsScaperAgent.py](Agents/eventsScaperAgent.py)**: Specialist agent templates (budget filtering, fund allocation, event scraping). Currently minimal/placeholder implementations.
+- **[Frontend/](Frontend/)**: Next.js React app with Tailwind CSS. Displays demo UI for travel planning with budget breakdown. Data files in `data/` (insights.json, user-history.json, community-insights.json) are static references for UI testing.
 
 ## Dependencies
 - `uagents`, `uagents_core` - Agent framework and Chat Protocol

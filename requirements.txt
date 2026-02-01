@@ -6,4 +6,5 @@ pymongo
 fastapi
 uvicorn
 langgraph
+google-auth
 
