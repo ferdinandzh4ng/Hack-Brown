@@ -102,18 +102,17 @@ export default function LoginPage() {
 
           <div id="gsi-button" className="w-full flex justify-center min-h-[44px]" />
 
-          <div className="text-center text-sm text-slate-muted mt-2">
-            <p>
-              Don&apos;t have an account?{' '}
-              <Link
-                href="/register"
-                className="text-visa-blue font-semibold inline-flex items-center gap-2 hover:underline"
-              >
-                <UserPlus className="w-4 h-4" />
-                Create one
-              </Link>
-            </p>
-          </div>
+          <Link
+            href="/register"
+            className="font-heading w-full py-3 md:py-4 rounded-xl font-bold text-sm md:text-base border-2 border-visa-blue text-visa-blue bg-transparent hover:bg-visa-blue/5 transition-colors inline-flex items-center justify-center gap-2"
+          >
+            <UserPlus className="w-4 h-4" />
+            Sign up
+          </Link>
+
+          <p className="text-center text-sm text-slate-muted">
+            Already have an account? You&apos;re on the sign-in page.
+          </p>
         </div>
       </div>
     </div>
