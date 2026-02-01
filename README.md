@@ -14,7 +14,7 @@ Our web app mobilizes AI agents to scour the internet for events and venues that
 
 # How we built it
 
-Utilizing Fetchai, we were able to relegate tasks such as organizing a user's hobbies, finding a large budget-friendly, pool of venues, and filtering and scheduling these events based on interests/availability to multiple AI` agents. Additionally, using map data from MapBox we display the relative locations of each of the different venues. 
+Utilizing Fetchai, we were able to relegate tasks such as organizing a user's hobbies, finding a large budget-friendly, pool of venues, and filtering and scheduling these events based on interests/availability to multiple AI agents. Additionally, using map data from MapBox we display the relative locations of each of the different venues. 
 
 
 # Challenges we ran into
