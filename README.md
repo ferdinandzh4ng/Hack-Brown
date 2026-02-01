@@ -11,7 +11,6 @@ In the age of chat bots, AI, despite the technological opportunities it presents
 
 Our web app mobilizes AI agents to scour the internet for events and venues that match a user's profile defined by their interests. These agents coordinate to build a schedule to fill a user's free time. From here, the user must consent to the corresponding payments. This service transforms a long, tedious effort into something quick, easy, and efficient. Our project is a demo of our vision for how users would interact with Visa's Intelligent Commerce API; in order to keep users away from cash, the API reduces the entire process of planning a day into a simple button tap.
 
-
 # How we built it
 
 Utilizing Fetch.ai, we were able to relegate tasks such as organizing a user's hobbies, finding a large budget-friendly pool of venues, and filtering and scheduling these events based on interests/availability to multiple AI agents. Additionally, using map data from MapBox we display the relative locations of each of the different venues. 
@@ -30,7 +29,7 @@ Utilizing Fetch.ai, we were able to relegate tasks such as organizing a user's h
 We are very proud of what we've accomplished at Hack at Brown! While our project is currently a demo for how Agentic AI can be used to participate in the VISA community, we take great pride in knowing that our product serves as a valuable pilot run for many features that VISA is currently exploring and developing in their VAS and PPD wings. 
 
 # What we learned 
-
+Our team gained a plethrora of experience in developing Agentic workflows, such as those offered by Fetch.AI's AgentVerse and ASI tools. On a more ground-level basis, our team learned through trial and error that we have to save our local copies to GitHub very frequently, and not wait until all features are fully developed before doing so. This experience made us far more systematic and methodical programmers, and made us much more aware of the importance of ensuring redundancy both within our code and the process we used to code it. 
 
 # Roadmap
  later down the line, we’ll be able to grow our solution by using the Intelligent Commerce API, which would allow us to properly perform the transactions.
