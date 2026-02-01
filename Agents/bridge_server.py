@@ -27,13 +27,14 @@ from uagents_core.contrib.protocols.chat import (
     chat_protocol_spec,
 )
 
-# Import Gemini fallback
-try:
-    from gemini_fallback import generate_schedule_with_gemini
-    GEMINI_FALLBACK_AVAILABLE = True
-except ImportError:
-    GEMINI_FALLBACK_AVAILABLE = False
-    print("Warning: Gemini fallback not available. Install google-generativeai for fallback support.")
+# Import Gemini fallback - COMMENTED OUT
+# try:
+#     from gemini_fallback import generate_schedule_with_gemini
+#     GEMINI_FALLBACK_AVAILABLE = True
+# except ImportError:
+#     GEMINI_FALLBACK_AVAILABLE = False
+#     print("Warning: Gemini fallback not available. Install google-generativeai for fallback support.")
+GEMINI_FALLBACK_AVAILABLE = False
 
 load_dotenv()
 
@@ -88,7 +89,7 @@ bridge_state = BridgeState()
 bridge_agent = Agent(
     name="BridgeAgent",
     seed="bridge-server-seed",
-    port=8008,
+    port=8009,
     mailbox=True,
     publish_agent_details=True,
     network="testnet"
@@ -279,7 +280,7 @@ def extract_activities_and_budget(user_request: str) -> Tuple[list, float]:
         activities = ["sightseeing", "dining", "entertainment"]
     
     # Estimate budget from user request or use default
-    budget = 500.0  # Default budget
+    budget = 200.0  # Default budget
     if "$" in user_request:
         import re
         budget_matches = re.findall(r'\$(\d+)', user_request)
@@ -288,6 +289,20 @@ def extract_activities_and_budget(user_request: str) -> Tuple[list, float]:
     
     return activities, budget
 
+# COMMENTED OUT: Gemini fallback function
+# async def call_gemini_fallback(
+#     user_request: str,
+#     location: str,
+#     start_time: str,
+#     end_time: str,
+#     user_id: Optional[str] = None,
+#     budget: Optional[float] = None
+# ) -> dict:
+#     """Call Gemini fallback with extracted activities and budget"""
+#     return {
+#         "error": "Gemini fallback is disabled.",
+#         "fallback_attempted": False
+#     }
 async def call_gemini_fallback(
     user_request: str,
     location: str,
@@ -296,63 +311,11 @@ async def call_gemini_fallback(
     user_id: Optional[str] = None,
     budget: Optional[float] = None
 ) -> dict:
-    """Call Gemini fallback with extracted activities and budget"""
-    if not GEMINI_FALLBACK_AVAILABLE:
-        return {
-            "error": "Gemini fallback not available.",
-            "fallback_attempted": False
-        }
-    
-    try:
-        activities, extracted_budget = extract_activities_and_budget(user_request)
-        # Use provided budget if available, otherwise use extracted budget
-        final_budget = budget if budget is not None else extracted_budget
-        
-        print(f"Calling Gemini fallback with: location={location}, budget={final_budget}, activities={activities}, user_id={user_id}")
-        gemini_result = generate_schedule_with_gemini(
-            location=location,
-            budget=final_budget,
-            interest_activities=activities,
-            start_time=start_time,
-            end_time=end_time,
-            user_request=user_request,
-            user_id=user_id
-        )
-        
-        if gemini_result and not gemini_result.get("error"):
-            print(f"✓ Gemini fallback succeeded, returning schedule")
-            return gemini_result
-        else:
-            gemini_error = gemini_result.get("error", "Unknown Gemini error") if gemini_result else "No response from Gemini"
-            print(f"✗ Gemini fallback failed: {gemini_error}")
-            
-            # Check if it's a quota error (429)
-            is_quota_error = "429" in str(gemini_error) or "quota" in str(gemini_error).lower() or "rate limit" in str(gemini_error).lower()
-            
-            if is_quota_error:
-                print(f"Gemini quota exceeded - generating simple fallback schedule")
-                activities, budget = extract_activities_and_budget(user_request)
-                # Generate a simple fallback schedule without API
-                return generate_simple_fallback_schedule(
-                    location=location,
-                    budget=budget,
-                    activities=activities,
-                    start_time=start_time,
-                    end_time=end_time
-                )
-            else:
-                return {
-                    "error": f"Gemini fallback failed: {gemini_error}",
-                    "fallback_attempted": True
-                }
-    except Exception as gemini_err:
-        print(f"✗ Exception in Gemini fallback: {gemini_err}")
-        import traceback
-        traceback.print_exc()
-        return {
-            "error": f"Gemini fallback error: {str(gemini_err)}",
-            "fallback_attempted": True
-        }
+    """Call Gemini fallback - DISABLED"""
+    return {
+        "error": "Gemini fallback is disabled.",
+        "fallback_attempted": False
+    }
 
 def generate_simple_fallback_schedule(
     location: str,

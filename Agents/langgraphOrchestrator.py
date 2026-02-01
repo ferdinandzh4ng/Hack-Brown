@@ -389,8 +389,14 @@ def extract_parameters_node(state: OrchestratorState) -> OrchestratorState:
                 current_location = location_from_constraints
             state["location"] = current_location
         
-        # Budget comes from dispatch plan (extracted from user_request)
-        state["budget"] = constraints.get("budget") or 500.0  # Default budget if not provided
+        # Budget: prefer budget from initial state (JSON), then constraints, then default to 200.0
+        current_budget = state.get("budget", 0.0)
+        if current_budget > 0:
+            # Keep the budget from JSON/initial state
+            state["budget"] = current_budget
+        else:
+            # Use budget from constraints if available, otherwise default to 200.0
+            state["budget"] = constraints.get("budget") or 200.0
         
         # Calculate timeframe from start_time and end_time if available
         start_time = state.get("start_time")
@@ -1311,12 +1317,12 @@ async def handle_user_message(ctx: Context, sender: str, msg: ChatMessage):
         
         # Initialize state with JSON values if provided (or from conversation_state if waiting for clarification)
         # Extract budget from JSON or use default
-        budget_value = 0.0
+        budget_value = 200.0  # Default budget
         if budget_from_json is not None:
             try:
                 budget_value = float(budget_from_json)
             except (ValueError, TypeError):
-                budget_value = 0.0
+                budget_value = 200.0  # Default budget on parse error
         
         initial_state: OrchestratorState = {
             "user_input": user_request_text,  # Use user_request for intent dispatcher (or clarification response)

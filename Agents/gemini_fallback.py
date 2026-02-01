@@ -99,7 +99,25 @@ def get_user_preferences(user_id: Optional[str]) -> Optional[Dict]:
     
     return None
 
+# COMMENTED OUT: Gemini fallback disabled
 def generate_schedule_with_gemini(
+    location: str,
+    budget: float,
+    interest_activities: List[str],
+    start_time: Optional[str] = None,
+    end_time: Optional[str] = None,
+    user_request: Optional[str] = None,
+    user_id: Optional[str] = None
+) -> Dict[str, Any]:
+    """Gemini fallback - DISABLED"""
+    return {
+        "error": "Gemini fallback is disabled.",
+        "fallback_attempted": False
+    }
+    
+# ORIGINAL FUNCTION COMMENTED OUT:
+"""
+def generate_schedule_with_gemini_ORIGINAL(
     location: str,
     budget: float,
     interest_activities: List[str],
@@ -201,30 +219,33 @@ def generate_schedule_with_gemini(
                     "error": f"Could not initialize any Gemini model. Available models: {', '.join(available_models[:10]) if available_models else 'unknown (could not list)'}. Error: {str(e)}"
                 }
         
-        # Parse times if provided and convert to location timezone
+        # Parse times if provided - keep everything in UTC to avoid timezone issues
         start_dt = None
         end_dt = None
-        location_tz = None
-        
-        # Try to get timezone for location
-        if PYTZ_AVAILABLE:
-            location_tz = get_timezone_for_location(location)
         
         if start_time:
             try:
                 start_dt = datetime.fromisoformat(start_time.replace('Z', '+00:00'))
-                # Convert to location timezone if available
-                if location_tz and start_dt.tzinfo:
-                    start_dt = start_dt.astimezone(location_tz)
-            except:
+                # Ensure UTC timezone
+                if start_dt.tzinfo is None:
+                    start_dt = start_dt.replace(tzinfo=timezone.utc)
+                else:
+                    # Convert to UTC if not already
+                    start_dt = start_dt.astimezone(timezone.utc)
+            except Exception as e:
+                print(f"Warning: Could not parse start_time: {e}")
                 pass
         if end_time:
             try:
                 end_dt = datetime.fromisoformat(end_time.replace('Z', '+00:00'))
-                # Convert to location timezone if available
-                if location_tz and end_dt.tzinfo:
-                    end_dt = end_dt.astimezone(location_tz)
-            except:
+                # Ensure UTC timezone
+                if end_dt.tzinfo is None:
+                    end_dt = end_dt.replace(tzinfo=timezone.utc)
+                else:
+                    # Convert to UTC if not already
+                    end_dt = end_dt.astimezone(timezone.utc)
+            except Exception as e:
+                print(f"Warning: Could not parse end_time: {e}")
                 pass
         
         # Calculate duration
@@ -263,31 +284,18 @@ def generate_schedule_with_gemini(
                         preferences_context += "- Include visits to: " + ", ".join(favorite_stores) + " if available in " + location + "\n"
                     preferences_context += "\nDo NOT use generic activity names. Use specific venue names, restaurant names, attraction names, etc. based on the user's preferences.\n"
         
-        # Build prompt for Gemini with timezone information
+        # Build prompt for Gemini - all times in UTC
         activities_str = ", ".join(interest_activities)
         time_info = ""
-        timezone_info = ""
-        
-        if location_tz:
-            tz_name = str(location_tz)
-            # Extract readable timezone name (e.g., "America/New_York" -> "Eastern Time")
-            if "/" in tz_name:
-                tz_parts = tz_name.split("/")
-                timezone_info = f" (Timezone: {tz_parts[-1].replace('_', ' ')})"
         
         if start_dt and end_dt:
-            # Format with timezone info
-            start_str = start_dt.strftime('%Y-%m-%d %H:%M')
-            end_str = end_dt.strftime('%Y-%m-%d %H:%M')
-            if location_tz:
-                start_str += f" {location_tz.tzname(start_dt)}"
-                end_str += f" {location_tz.tzname(end_dt)}"
-            time_info = f" from {start_str} to {end_str}{timezone_info}"
+            # Format times in UTC
+            start_str = start_dt.strftime('%Y-%m-%d %H:%M UTC')
+            end_str = end_dt.strftime('%Y-%m-%d %H:%M UTC')
+            time_info = f" from {start_str} to {end_str}"
         elif start_dt:
-            start_str = start_dt.strftime('%Y-%m-%d %H:%M')
-            if location_tz:
-                start_str += f" {location_tz.tzname(start_dt)}"
-            time_info = f" starting at {start_str}{timezone_info}"
+            start_str = start_dt.strftime('%Y-%m-%d %H:%M UTC')
+            time_info = f" starting at {start_str}"
         
         prompt = f"""You are a travel planning assistant. Create a detailed schedule for a trip to {location} with a budget of ${budget:.2f}.
 
@@ -343,13 +351,12 @@ Requirements:
 - Include realistic addresses and details for {location}
 - Mix of activities matching: {activities_str}
 - CRITICAL: Ensure start_time and end_time are valid ISO 8601 format in UTC (e.g., "2026-02-01T10:00:00.000Z")
-- CRITICAL: All times must be in UTC timezone (Z suffix) - convert from local timezone if needed
+- CRITICAL: All times must be in UTC timezone (Z suffix)
 - For transit activities, include "method" field (walking, transit, taxi, etc.)
 - For venue activities, type should be "venue", not the category name
 - Make costs realistic for {location}
 - Transit activities should have realistic costs (walking: $0, transit: $2-5, taxi: $10-30)
 - Each venue activity should be followed by a transit activity to the next venue (except the last one)
-- IMPORTANT: Account for timezone differences - schedule activities in local time for {location}, but return times in UTC (ISO 8601 with Z)
 
 Generate the schedule now:"""
 
@@ -463,26 +470,27 @@ Generate the schedule now:"""
                                     except:
                                         dt = datetime.strptime(time_str_clean, "%Y-%m-%d %H:%M:%S")
                                     
-                                    # If we have location timezone, assume the time is in that timezone
-                                    if location_tz and dt:
-                                        dt = location_tz.localize(dt)
-                                    elif dt:
-                                        # Assume UTC if no timezone info
+                                    # Keep everything in UTC - no timezone conversion
+                                    if dt and dt.tzinfo is None:
+                                        # Naive datetime - assume UTC
                                         dt = dt.replace(tzinfo=timezone.utc)
+                                    elif dt and dt.tzinfo:
+                                        # Already has timezone - convert to UTC
+                                        dt = dt.astimezone(timezone.utc)
                                 else:
                                     # Try ISO format
                                     dt = datetime.fromisoformat(time_str.replace('Z', '+00:00'))
                                 
-                                # Convert to UTC if not already
-                                if dt and dt.tzinfo:
-                                    dt_utc = dt.astimezone(timezone.utc)
-                                elif dt:
-                                    dt_utc = dt.replace(tzinfo=timezone.utc)
+                                # Ensure UTC and convert to ISO 8601 format
+                                if dt:
+                                    if dt.tzinfo is None:
+                                        dt_utc = dt.replace(tzinfo=timezone.utc)
+                                    else:
+                                        dt_utc = dt.astimezone(timezone.utc)
+                                    # Convert to ISO 8601 with Z
+                                    activity[time_field] = dt_utc.strftime("%Y-%m-%dT%H:%M:%S.000Z")
                                 else:
                                     continue
-                                
-                                # Convert to ISO 8601 with Z
-                                activity[time_field] = dt_utc.strftime("%Y-%m-%dT%H:%M:%S.000Z")
                             except Exception as e:
                                 # If parsing fails, keep original
                                 print(f"Warning: Could not parse time {time_str}: {e}")
