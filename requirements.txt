@@ -11,4 +11,5 @@ google-generativeai
 pytz
 cryptography
 requests
+certifi
 

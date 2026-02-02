@@ -7,10 +7,11 @@ import os
 import json
 import hashlib
 import secrets
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Dict, Optional, Tuple, List
 from pymongo import MongoClient, ASCENDING
 from pymongo.errors import DuplicateKeyError
+import certifi
 from dotenv import load_dotenv
 try:
     from cryptography.fernet import Fernet
@@ -71,9 +72,17 @@ class LoginManager:
                     cluster_host = f"{cluster_lower}.mongodb.net"
                 
                 database = os.getenv("MONGODB_DATABASE", "HackBrown")
-                connection_string = f"mongodb+srv://{mongodb_username}:{mongodb_password}@{cluster_host}/{database}?retryWrites=true&w=majority"
+                # For Python 3.12 compatibility, add TLS parameters to connection string
+                connection_string = f"mongodb+srv://{mongodb_username}:{mongodb_password}@{cluster_host}/{database}?retryWrites=true&w=majority&tls=true"
             
-            client = MongoClient(connection_string, serverSelectionTimeoutMS=10000)
+            # For Python 3.12 SSL compatibility - use certifi CA bundle
+            client = MongoClient(
+                connection_string, 
+                serverSelectionTimeoutMS=10000,
+                connectTimeoutMS=20000,
+                socketTimeoutMS=20000,
+                tlsCAFile=certifi.where()
+            )
             client.admin.command('ping')
             print("Successfully connected to MongoDB")
             return client
@@ -101,6 +110,11 @@ class LoginManager:
             # Create indexes for payment methods
             payment_methods_collection.create_index([("user_id", ASCENDING)])
             payment_methods_collection.create_index([("user_id", ASCENDING), ("is_default", ASCENDING)])
+            
+            # Create trips/itineraries collection
+            trips_collection = self.db["trips"]
+            trips_collection.create_index([("user_id", ASCENDING)])
+            trips_collection.create_index([("user_id", ASCENDING), ("created_at", ASCENDING)])
             
             print("MongoDB collections and indexes created successfully")
         except Exception as e:
@@ -866,6 +880,120 @@ class LoginManager:
         except Exception as e:
             print(f"Error checking payment methods: {e}")
             return False
+    
+    def save_trip(self, user_id: str, trip_data: Dict) -> Tuple[bool, str, Optional[str]]:
+        """
+        Save a trip/itinerary to MongoDB.
+        
+        Args:
+            user_id: MongoDB ObjectId as string
+            trip_data: Dictionary containing trip information (location, activities, budget, etc.)
+        
+        Returns:
+            Tuple of (success: bool, message: str, trip_id: Optional[str])
+        """
+        if self.db is None:
+            return False, "Database connection not available", None
+        
+        try:
+            from bson.objectid import ObjectId
+            trips_collection = self.db["trips"]
+            
+            trip_document = {
+                "user_id": ObjectId(user_id),
+                "location": trip_data.get("location", ""),
+                "start_time": trip_data.get("start_time", ""),
+                "end_time": trip_data.get("end_time", ""),
+                "budget": trip_data.get("budget"),
+                "user_request": trip_data.get("user_request", ""),
+                "activities": trip_data.get("activities", []),
+                "itinerary": trip_data.get("itinerary", []),
+                "created_at": datetime.now(timezone.utc),
+                "updated_at": datetime.now(timezone.utc)
+            }
+            
+            result = trips_collection.insert_one(trip_document)
+            trip_id = str(result.inserted_id)
+            return True, "Trip saved successfully", trip_id
+            
+        except Exception as e:
+            print(f"Error saving trip: {e}")
+            return False, f"Failed to save trip: {str(e)}", None
+    
+    def get_user_trips(self, user_id: str, limit: int = 50) -> List[Dict]:
+        """
+        Get all trips/itineraries for a user.
+        
+        Args:
+            user_id: MongoDB ObjectId as string
+            limit: Maximum number of trips to return
+        
+        Returns:
+            List of trip dictionaries
+        """
+        if self.db is None:
+            return []
+        
+        try:
+            from bson.objectid import ObjectId
+            trips_collection = self.db["trips"]
+            
+            trips = trips_collection.find(
+                {"user_id": ObjectId(user_id)}
+            ).sort("created_at", -1).limit(limit)
+            
+            result = []
+            for trip in trips:
+                result.append({
+                    "trip_id": str(trip["_id"]),
+                    "location": trip.get("location", ""),
+                    "start_time": trip.get("start_time", ""),
+                    "end_time": trip.get("end_time", ""),
+                    "budget": trip.get("budget"),
+                    "user_request": trip.get("user_request", ""),
+                    "activities": trip.get("activities", []),
+                    "itinerary": trip.get("itinerary", []),
+                    "created_at": trip.get("created_at", datetime.now(timezone.utc)).isoformat() if isinstance(trip.get("created_at"), datetime) else trip.get("created_at"),
+                    "updated_at": trip.get("updated_at", datetime.now(timezone.utc)).isoformat() if isinstance(trip.get("updated_at"), datetime) else trip.get("updated_at")
+                })
+            
+            return result
+            
+        except Exception as e:
+            print(f"Error fetching trips: {e}")
+            return []
+    
+    def delete_trip(self, user_id: str, trip_id: str) -> Tuple[bool, str]:
+        """
+        Delete a trip/itinerary.
+        
+        Args:
+            user_id: MongoDB ObjectId as string
+            trip_id: MongoDB ObjectId as string of the trip to delete
+        
+        Returns:
+            Tuple of (success: bool, message: str)
+        """
+        if self.db is None:
+            return False, "Database connection not available"
+        
+        try:
+            from bson.objectid import ObjectId
+            trips_collection = self.db["trips"]
+            
+            result = trips_collection.delete_one({
+                "_id": ObjectId(trip_id),
+                "user_id": ObjectId(user_id)
+            })
+            
+            if result.deleted_count > 0:
+                return True, "Trip deleted successfully"
+            else:
+                return False, "Trip not found or access denied"
+                
+        except Exception as e:
+            print(f"Error deleting trip: {e}")
+            return False, f"Failed to delete trip: {str(e)}"
     
     def get_default_payment_method_for_processing(self, user_id: str) -> Optional[Dict]:
         """

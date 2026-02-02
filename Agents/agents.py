@@ -282,6 +282,7 @@ async def handle_message(ctx: Context, sender: str, msg: ChatMessage):
                     start_time_from_json = parsed.get("start_time")
                     end_time_from_json = parsed.get("end_time")
                     budget_from_json = parsed.get("budget")
+                    user_id_from_json = parsed.get("user_id")
                     
                     # Store JSON values for later use; pending_location = current request (survives session change)
                     ctx.storage.set("pending_location", location_from_json)
@@ -291,8 +292,10 @@ async def handle_message(ctx: Context, sender: str, msg: ChatMessage):
                     ctx.storage.set(f"json_end_time_{ctx.session}", end_time_from_json)
                     if budget_from_json is not None:
                         ctx.storage.set(f"json_budget_{ctx.session}", budget_from_json)
+                    if user_id_from_json is not None:
+                        ctx.storage.set(f"json_user_id_{ctx.session}", user_id_from_json)
                     
-                    ctx.logger.info(f"Parsed JSON input: location={location_from_json}, start_time={start_time_from_json}, end_time={end_time_from_json}, budget={budget_from_json}")
+                    ctx.logger.info(f"Parsed JSON input: location={location_from_json}, start_time={start_time_from_json}, end_time={end_time_from_json}, budget={budget_from_json}, user_id={user_id_from_json}")
                     ctx.logger.info(f"Using user_request for intent extraction: {message_text}")
             except (json.JSONDecodeError, ValueError):
                 # Not JSON format, use text as-is
@@ -513,6 +516,9 @@ async def handle_structured_output_response(
         if end_time_to_use:
             ctx.storage.set(f"json_end_time_for_dispatch_{ctx.session}", end_time_to_use)
         
+        # Get user_id from JSON if available
+        json_user_id = ctx.storage.get(f"json_user_id_{ctx.session}")
+        
         # If times were available and not in structured output, add them to user_request
         if (start_time_to_use or end_time_to_use) and not intent_data.get("start_time") and not intent_data.get("end_time"):
             ctx.logger.info(f'Using times: start_time={start_time_to_use}, end_time={end_time_to_use}')
@@ -529,13 +535,14 @@ async def handle_structured_output_response(
         conversation_state = ctx.storage.get(conversation_state_key)
         
         # Process intent dispatch (always call this, not just when times are available)
-        # Pass session context and times so dispatch_intent can use them
+        # Pass session context, times, and user_id so dispatch_intent can use them
         result = dispatch_intent(
             user_request, 
             session_sender, 
             conversation_state,
             json_start_time=start_time_to_use,
-            json_end_time=end_time_to_use
+            json_end_time=end_time_to_use,
+            user_id=json_user_id
         )
         
         # Check if result is None or invalid

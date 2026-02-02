@@ -329,6 +329,7 @@ export default function HelpingHandApp() {
   const [bookingResult, setBookingResult] = useState<any>(null);
   const [showSuccessModal, setShowSuccessModal] = useState(false);
   const [bookingConfirmed, setBookingConfirmed] = useState(false);
+  const [hasConfirmedBooking, setHasConfirmedBooking] = useState(false);
   const [user, setUser] = useState<any>(null);
   const [showUserMenu, setShowUserMenu] = useState(false);
 
@@ -415,16 +416,13 @@ export default function HelpingHandApp() {
   );
 
   const remainingBudget = useMemo(() => {
-    // If we have API budget, calculate remaining from total cost
-    if (apiBudget !== null) {
-      const totalSpent = recommendations
-        .filter((r) => selectedIds.includes(r.id))
-        .reduce((sum, r) => sum + parseCost(r.cost), 0);
-      return Math.max(0, Math.round((apiBudget - totalSpent) * 100) / 100);
-    }
-    // Otherwise use initial budget
-    return Math.max(0, Math.round((INITIAL_BUDGET - spent) * 100) / 100);
-  }, [spent, apiBudget, recommendations, selectedIds]);
+    // Use the actual budget from API or user's selected budget
+    const actualBudget = apiBudget !== null ? apiBudget : (parseFloat(budget) || INITIAL_BUDGET);
+    const totalSpent = recommendations
+      .filter((r) => selectedIds.includes(r.id))
+      .reduce((sum, r) => sum + parseCost(r.cost), 0);
+    return Math.max(0, Math.round((actualBudget - totalSpent) * 100) / 100);
+  }, [spent, apiBudget, budget, recommendations, selectedIds]);
 
   useEffect(() => {
     setSelectedIds([]);
@@ -691,6 +689,51 @@ export default function HelpingHandApp() {
         setViewState("IDLE");
       } else if (recommendations.length > 0) {
         setViewState("RESULTS");
+        
+        // Save trip to MongoDB if user is logged in
+        const token = typeof localStorage !== "undefined"
+          ? localStorage.getItem("session_token")
+          : null;
+        
+        if (token && user?.user_id) {
+          try {
+            // Transform recommendations to activities format for saving
+            const activities = recommendations.map((rec) => ({
+              id: rec.id,
+              title: rec.title,
+              cost: parseCost(rec.cost),
+              start_time: rec.startTime,
+              end_time: rec.endTime,
+              address: rec.address,
+              coordinates: rec.coordinates,
+              description: rec.agent_reasoning,
+            }));
+            
+            const saveResponse = await fetch("http://localhost:8005/api/save-trip", {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+                "Authorization": `Bearer ${token}`,
+              },
+              body: JSON.stringify({
+                location: location,
+                start_time: startTime,
+                end_time: endTime,
+                budget: parseFloat(budget) || apiBudget || null,
+                user_request: chatInput,
+                activities: activities,
+                itinerary: activities,
+              }),
+            });
+            
+            if (saveResponse.ok) {
+              console.log("Trip saved successfully");
+            }
+          } catch (saveErr) {
+            console.error("Failed to save trip:", saveErr);
+            // Don't show error to user - saving is optional
+          }
+        }
       } else {
         setError("No activities found. Try a different location or request.");
         setViewState("IDLE");
@@ -870,9 +913,16 @@ export default function HelpingHandApp() {
 
       setBookingResult(result.data);
       setError(null);
+      setHasConfirmedBooking(true); // Prevent multiple clicks
       
-      // Show success modal for all booking results (all are marked as success)
-      if (result.data?.bookings && result.data.bookings.length > 0) {
+      // Show success modal for all booking results
+      // Check if bookings exist in the response
+      const bookings = result.data?.bookings || result.data?.data?.bookings || [];
+      if (bookings.length > 0 || result.data) {
+        setShowSuccessModal(true);
+      } else {
+        // If no bookings but request succeeded, still show modal
+        console.log("Booking response:", result.data);
         setShowSuccessModal(true);
       }
     } catch (err) {
@@ -942,7 +992,7 @@ export default function HelpingHandApp() {
   }
 
   // Get all bookings for modal (all are marked as success now)
-  const allBookings = bookingResult?.bookings || [];
+  const allBookings = bookingResult?.bookings || bookingResult?.data?.bookings || [];
 
   return (
     <div
@@ -1340,19 +1390,20 @@ export default function HelpingHandApp() {
                 </div>
               </div>
               <button
-                onClick={() => {
-                  setViewState("IDLE");
-                  setChatInput("");
-                  setSelectedIds([]);
-                  setLocation("");
-                  setStartTime("");
-                  setEndTime("");
-                  setApiRecommendations([]);
-                  setTransitInfo(new Map());
-                  setApiBudget(null);
-                  setItineraryOrder([]);
-                  setError(null);
-                }}
+              onClick={() => {
+                setViewState("IDLE");
+                setChatInput("");
+                setSelectedIds([]);
+                setLocation("");
+                setStartTime("");
+                setEndTime("");
+                setApiRecommendations([]);
+                setTransitInfo(new Map());
+                setApiBudget(null);
+                setItineraryOrder([]);
+                setError(null);
+                setHasConfirmedBooking(false); // Reset booking confirmation state
+              }}
                 className={`p-1.5 rounded-full ${
                   isDarkMode
                     ? "bg-slate-700 text-slate-300 hover:bg-slate-600"
@@ -1402,16 +1453,6 @@ export default function HelpingHandApp() {
               >
                 {itineraryGroups[activeItineraryIndex]?.group_name ?? "Itinerary"}
               </h3>
-              <span
-                className={`font-price text-xs font-bold px-2 py-1.5 rounded-md tracking-tighter ${
-                  isDarkMode
-                    ? "bg-visa-gold/25 text-visa-gold border border-visa-gold/50"
-                    : "text-visa-blue bg-[#003399]/10"
-                }`}
-                title="Budget after full itinerary"
-              >
-                Budget: ${remainingBudget.toFixed(2)}
-              </span>
             </div>
 
             {/* Scrollable Results */}
@@ -1462,9 +1503,9 @@ export default function HelpingHandApp() {
                         <button
                           type="button"
                           onClick={handleConfirmAndBook}
-                          disabled={isBooking || activeGroupItems.length === 0}
+                          disabled={isBooking || activeGroupItems.length === 0 || hasConfirmedBooking}
                           className={`font-heading w-full py-4 rounded-xl font-bold text-sm tracking-tight transition-all ${
-                            isBooking || activeGroupItems.length === 0
+                            isBooking || activeGroupItems.length === 0 || hasConfirmedBooking
                               ? "bg-slate-400 text-white cursor-not-allowed"
                               : "bg-visa-gold text-slate-900 hover:bg-visa-gold/90 shadow-lg"
                           }`}
@@ -1473,6 +1514,10 @@ export default function HelpingHandApp() {
                             <>
                               <span className="inline-block animate-spin mr-2">⏳</span>
                               Processing…
+                            </>
+                          ) : hasConfirmedBooking ? (
+                            <>
+                              Booking Confirmed
                             </>
                           ) : (
                             <>
@@ -1577,7 +1622,7 @@ export default function HelpingHandApp() {
 
       {/* Success Modal */}
       <AnimatePresence>
-        {showSuccessModal && allBookings.length > 0 && (
+        {showSuccessModal && (
           <motion.div
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
@@ -1636,7 +1681,7 @@ export default function HelpingHandApp() {
 
               {/* Booking Details */}
               <div className="space-y-3 mb-6 max-h-64 overflow-y-auto">
-                {allBookings.map((booking: any, idx: number) => (
+                {allBookings.length > 0 ? allBookings.map((booking: any, idx: number) => (
                   <div
                     key={idx}
                     className={`p-4 rounded-xl ${
@@ -1708,7 +1753,24 @@ export default function HelpingHandApp() {
                       )}
                     </div>
                   </div>
-                ))}
+                )) : (
+                  <div className={`p-4 rounded-xl ${
+                    isDarkMode
+                      ? "bg-slate-700/50 border border-slate-600"
+                      : "bg-emerald-50 border border-emerald-200"
+                  }`}>
+                    <div className={`font-semibold mb-2 ${
+                      isDarkMode ? "text-white" : "text-slate-900"
+                    }`}>
+                      Booking Processed
+                    </div>
+                    <div className={`text-sm ${
+                      isDarkMode ? "text-slate-300" : "text-slate-700"
+                    }`}>
+                      Your booking request has been received and processed successfully.
+                    </div>
+                  </div>
+                )}
               </div>
 
               {/* Summary */}

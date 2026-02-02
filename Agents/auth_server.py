@@ -463,6 +463,60 @@ async def check_payment_methods(authorization: Optional[str] = Header(None)):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to check payment methods: {str(e)}")
 
+@app.get("/auth/trips")
+async def get_user_trips(authorization: Optional[str] = Header(None)):
+    """Get all trips/itineraries for the authenticated user"""
+    try:
+        if not authorization or not authorization.startswith("Bearer "):
+            raise HTTPException(status_code=401, detail="Authentication required")
+        
+        token = authorization.replace("Bearer ", "")
+        success, user_data = login_manager.verify_session(token)
+        
+        if not success or not user_data:
+            raise HTTPException(status_code=401, detail="Invalid or expired session")
+        
+        user_id = user_data.get("user_id")
+        if not user_id:
+            raise HTTPException(status_code=401, detail="User ID not found")
+        
+        trips = login_manager.get_user_trips(user_id)
+        return {
+            "success": True,
+            "trips": trips
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to fetch trips: {str(e)}")
+
+@app.delete("/auth/trips/{trip_id}")
+async def delete_trip(trip_id: str, authorization: Optional[str] = Header(None)):
+    """Delete a trip/itinerary"""
+    try:
+        if not authorization or not authorization.startswith("Bearer "):
+            raise HTTPException(status_code=401, detail="Authentication required")
+        
+        token = authorization.replace("Bearer ", "")
+        success, user_data = login_manager.verify_session(token)
+        
+        if not success or not user_data:
+            raise HTTPException(status_code=401, detail="Invalid or expired session")
+        
+        user_id = user_data.get("user_id")
+        if not user_id:
+            raise HTTPException(status_code=401, detail="User ID not found")
+        
+        success, message = login_manager.delete_trip(user_id, trip_id)
+        if success:
+            return {"success": True, "message": message}
+        else:
+            raise HTTPException(status_code=404, detail=message)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to delete trip: {str(e)}")
+
 @app.get("/health")
 async def health_check():
     """Health check endpoint"""

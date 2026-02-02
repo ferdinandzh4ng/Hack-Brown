@@ -12,6 +12,10 @@ import {
   Trash2,
   Check,
   X,
+  MapPin,
+  Calendar,
+  Clock,
+  DollarSign,
 } from "lucide-react";
 
 const AUTH_API_URL = process.env.NEXT_PUBLIC_AUTH_API_URL ?? "";
@@ -30,8 +34,11 @@ export default function ProfilePage() {
   const [user, setUser] = useState<any>(null);
   const [paymentMethods, setPaymentMethods] = useState<PaymentMethod[]>([]);
   const [loading, setLoading] = useState(true);
-  const [activeTab, setActiveTab] = useState<"preferences" | "payment">("preferences");
+  const [activeTab, setActiveTab] = useState<"preferences" | "payment" | "itineraries">("preferences");
   const [showAddPayment, setShowAddPayment] = useState(false);
+  const [trips, setTrips] = useState<any[]>([]);
+  const [loadingTrips, setLoadingTrips] = useState(false);
+  const [expandedTrips, setExpandedTrips] = useState<Set<string>>(new Set());
   const [isDarkMode, setIsDarkMode] = useState(false);
   
   // Payment form state
@@ -61,6 +68,7 @@ export default function ProfilePage() {
 
     loadUserData(token);
     loadPaymentMethods(token);
+    loadTrips(token);
   }, [router]);
 
   const loadUserData = async (token: string) => {
@@ -204,6 +212,56 @@ export default function ProfilePage() {
     }
   };
 
+  const loadTrips = async (token: string) => {
+    if (!AUTH_API_URL) return;
+    
+    setLoadingTrips(true);
+    try {
+      const response = await fetch(`${AUTH_API_URL.replace(/\/$/, '')}/auth/trips`, {
+        method: "GET",
+        headers: {
+          "Authorization": `Bearer ${token}`,
+          "Content-Type": "application/json",
+        },
+      });
+      
+      if (response.ok) {
+        const result = await response.json();
+        setTrips(result.trips || []);
+      }
+    } catch (err) {
+      console.error("Failed to load trips:", err);
+    } finally {
+      setLoadingTrips(false);
+    }
+  };
+
+  const handleDeleteTrip = async (tripId: string) => {
+    const token = typeof localStorage !== "undefined"
+      ? localStorage.getItem("session_token")
+      : null;
+    
+    if (!token || !AUTH_API_URL) return;
+
+    if (!confirm("Are you sure you want to delete this trip?")) return;
+
+    try {
+      const response = await fetch(`${AUTH_API_URL.replace(/\/$/, '')}/auth/trips/${tripId}`, {
+        method: "DELETE",
+        headers: {
+          "Authorization": `Bearer ${token}`,
+          "Content-Type": "application/json",
+        },
+      });
+
+      if (response.ok) {
+        await loadTrips(token);
+      }
+    } catch (err) {
+      console.error("Failed to delete trip:", err);
+    }
+  };
+
   const handleSavePreferences = async () => {
     const token = typeof localStorage !== "undefined"
       ? localStorage.getItem("session_token")
@@ -285,7 +343,7 @@ export default function ProfilePage() {
   const inputBg = isDarkMode ? "bg-slate-800" : "bg-slate-100";
 
   return (
-    <div className={`min-h-screen ${isDarkMode ? "bg-slate-950" : "bg-slate-100"}`}>
+    <div className={`min-h-screen overflow-y-auto ${isDarkMode ? "bg-slate-950" : "bg-slate-100"}`}>
       <div className="max-w-4xl mx-auto px-4 py-8">
         {/* Header */}
         <div className="flex items-center gap-4 mb-6">
@@ -328,6 +386,20 @@ export default function ProfilePage() {
           >
             <CreditCard size={18} />
             Payment Methods
+          </button>
+          <button
+            type="button"
+            onClick={() => setActiveTab("itineraries")}
+            className={`flex-1 flex items-center justify-center gap-2 py-2.5 px-4 rounded-lg font-medium transition-all ${
+              activeTab === "itineraries"
+                ? "bg-visa-blue text-white"
+                : isDarkMode
+                  ? "text-slate-400 hover:text-slate-200"
+                  : "text-slate-600 hover:text-slate-900"
+            }`}
+          >
+            <MapPin size={18} />
+            Itineraries
           </button>
         </div>
 
@@ -564,6 +636,192 @@ export default function ProfilePage() {
                 ))
               )}
             </div>
+          </motion.div>
+        )}
+
+        {/* Itineraries Tab */}
+        {activeTab === "itineraries" && (
+          <motion.div
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+            className={`${drawerBg} rounded-2xl p-6 shadow-lg max-h-[calc(100vh-200px)] overflow-y-auto`}
+          >
+            <h2 className={`text-lg font-bold mb-4 ${drawerText}`}>Saved Itineraries</h2>
+            
+            {loadingTrips ? (
+              <div className="flex items-center justify-center py-8">
+                <div className="w-8 h-8 rounded-full border-2 border-visa-blue border-t-transparent animate-spin" />
+              </div>
+            ) : trips.length === 0 ? (
+              <p className={`text-center py-8 ${drawerMuted}`}>
+                No saved itineraries yet. Create a trip to see it here.
+              </p>
+            ) : (
+              <div className="space-y-4">
+                {trips.map((trip) => (
+                  <div
+                    key={trip.trip_id}
+                    className={`p-4 rounded-xl border ${drawerBorder} ${
+                      isDarkMode ? "bg-slate-800" : "bg-slate-50"
+                    }`}
+                  >
+                    <div className="flex items-start justify-between mb-3">
+                      <div className="flex-1">
+                        <div className="flex items-center gap-2 mb-2">
+                          <MapPin size={18} className={drawerMuted} />
+                          <h3 className={`font-semibold ${drawerText}`}>{trip.location}</h3>
+                        </div>
+                        <div className={`flex items-center gap-4 text-sm ${drawerMuted}`}>
+                          <div className="flex items-center gap-1">
+                            <Calendar size={14} className={drawerMuted} />
+                            <span className={drawerMuted}>
+                              {trip.start_time ? new Date(trip.start_time).toLocaleDateString() : "N/A"} - {trip.end_time ? new Date(trip.end_time).toLocaleDateString() : "N/A"}
+                            </span>
+                          </div>
+                          {trip.budget && (
+                            <span className={drawerMuted}>
+                              Budget: ${trip.budget.toFixed(2)}
+                            </span>
+                          )}
+                        </div>
+                        {trip.user_request && (
+                          <p className={`text-sm mt-2 ${drawerMuted} line-clamp-2`}>
+                            {trip.user_request}
+                          </p>
+                        )}
+                        {trip.itinerary && trip.itinerary.length > 0 && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const newExpanded = new Set(expandedTrips);
+                              if (newExpanded.has(trip.trip_id)) {
+                                newExpanded.delete(trip.trip_id);
+                              } else {
+                                newExpanded.add(trip.trip_id);
+                              }
+                              setExpandedTrips(newExpanded);
+                            }}
+                            className={`text-xs mt-2 ${drawerMuted} hover:underline flex items-center gap-1`}
+                          >
+                            {trip.itinerary.length} activity{trip.itinerary.length !== 1 ? 'ies' : 'y'}
+                            <span className="text-[10px]">
+                              {expandedTrips.has(trip.trip_id) ? '▼' : '▶'}
+                            </span>
+                          </button>
+                        )}
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => handleDeleteTrip(trip.trip_id)}
+                        className="p-2 rounded-lg hover:bg-red-50 transition-colors ml-2"
+                        title="Delete"
+                      >
+                        <Trash2 size={18} className="text-red-500" />
+                      </button>
+                    </div>
+                    
+                    {/* Expanded Activities List */}
+                    {expandedTrips.has(trip.trip_id) && trip.itinerary && trip.itinerary.length > 0 && (
+                      <div className={`mt-4 pt-4 border-t ${drawerBorder} space-y-3`}>
+                        {trip.itinerary
+                          .sort((a: any, b: any) => {
+                            // Sort by start_time if available
+                            if (a.start_time && b.start_time) {
+                              return new Date(a.start_time).getTime() - new Date(b.start_time).getTime();
+                            }
+                            return 0;
+                          })
+                          .map((activity: any, idx: number) => (
+                            <div
+                              key={activity.id || idx}
+                              className={`p-3 rounded-lg ${
+                                isDarkMode ? "bg-slate-700/50" : "bg-white"
+                              } border ${drawerBorder}`}
+                            >
+                              <div className="flex items-start justify-between mb-2">
+                                <h4 className={`font-semibold text-sm ${drawerText}`}>
+                                  {activity.title || activity.venue || `Activity ${idx + 1}`}
+                                </h4>
+                                {activity.cost !== undefined && (
+                                  <span className={`text-sm font-medium ${drawerText} flex items-center gap-1`}>
+                                    <DollarSign size={14} />
+                                    {typeof activity.cost === 'number' ? activity.cost.toFixed(2) : activity.cost}
+                                  </span>
+                                )}
+                              </div>
+                              
+                              {(activity.start_time || activity.end_time) && (
+                                <div className={`flex items-center gap-2 text-xs ${drawerMuted} mb-2`}>
+                                  <Clock size={12} />
+                                  <span>
+                                    {(() => {
+                                      const formatTime = (timeStr: string) => {
+                                        if (!timeStr) return '';
+                                        
+                                        // If it's already a time string like "09:00" or "9:00 AM"
+                                        if (typeof timeStr === 'string' && timeStr.match(/^\d{1,2}:\d{2}/)) {
+                                          const [hours, minutes] = timeStr.split(':');
+                                          const hour = parseInt(hours, 10);
+                                          const min = minutes.split(' ')[0];
+                                          const period = hour >= 12 ? 'PM' : 'AM';
+                                          const displayHour = hour % 12 || 12;
+                                          return `${displayHour}:${min.padStart(2, '0')} ${period}`;
+                                        }
+                                        
+                                        // Try to parse as date
+                                        try {
+                                          const date = new Date(timeStr);
+                                          if (!isNaN(date.getTime())) {
+                                            return date.toLocaleTimeString('en-US', { 
+                                              hour: 'numeric', 
+                                              minute: '2-digit',
+                                              hour12: true 
+                                            });
+                                          }
+                                        } catch (e) {
+                                          // If parsing fails, return the string as-is
+                                          return timeStr;
+                                        }
+                                        
+                                        return timeStr;
+                                      };
+                                      
+                                      const start = formatTime(activity.start_time);
+                                      const end = formatTime(activity.end_time);
+                                      
+                                      if (start && end) {
+                                        return `${start} - ${end}`;
+                                      } else if (start) {
+                                        return start;
+                                      } else if (end) {
+                                        return end;
+                                      }
+                                      return 'TBD';
+                                    })()}
+                                  </span>
+                                </div>
+                              )}
+                              
+                              {activity.description && (
+                                <p className={`text-xs ${drawerMuted} line-clamp-2`}>
+                                  {activity.description}
+                                </p>
+                              )}
+                              
+                              {activity.address && (
+                                <div className={`flex items-center gap-1 text-xs ${drawerMuted} mt-2`}>
+                                  <MapPin size={10} />
+                                  <span className="line-clamp-1">{activity.address}</span>
+                                </div>
+                              )}
+                            </div>
+                          ))}
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
           </motion.div>
         )}
       </div>

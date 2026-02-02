@@ -65,71 +65,8 @@
         ]
     },
     "processed_message_ids": {
-        "161410a5-a76a-4689-8850-bc5bf1e355fa": "2026-02-01T14:08:57.966795+00:00",
-        "bd718af6-e69f-4321-a986-2bddcbc68db1": "2026-02-01T14:10:57.948180+00:00"
+        "8a65a6a3-4cd8-40ea-9516-eab451d6a7ba": "2026-02-02T23:44:15.946333+00:00",
+        "694928dd-0731-4ab9-89f6-dd8243fb212e": "2026-02-02T23:46:47.852636+00:00"
     },
-    "conversation_state_agent1qddkgq6ugvjkpx5zu5e40g0js88hqpcsj5trh56gqxtjvnrq6xanqzgan6w": {
-        "waiting_for_clarification": true,
-        "original_request": "I want to go on a day out. (Location: Providence, RI) (Budget: $150)",
-        "location": "go on",
-        "budget": "None",
-        "start_time": "2026-02-01T15:08:00.000Z",
-        "end_time": "2026-02-01T23:08:00.000Z",
-        "categories": [
-            {
-                "category": "eat",
-                "description": "Dining and food experiences",
-                "examples": [
-                    "local cuisine",
-                    "restaurants",
-                    "cafes"
-                ]
-            },
-            {
-                "category": "sightsee",
-                "description": "Sightseeing and landmarks",
-                "examples": [
-                    "monuments",
-                    "museums",
-                    "parks"
-                ]
-            },
-            {
-                "category": "shop",
-                "description": "Shopping and markets",
-                "examples": [
-                    "local markets",
-                    "boutiques",
-                    "souvenirs"
-                ]
-            },
-            {
-                "category": "entertainment",
-                "description": "Entertainment and nightlife",
-                "examples": [
-                    "shows",
-                    "concerts",
-                    "bars"
-                ]
-            },
-            {
-                "category": "outdoor",
-                "description": "Outdoor activities",
-                "examples": [
-                    "parks",
-                    "hiking",
-                    "beaches"
-                ]
-            },
-            {
-                "category": "cultural",
-                "description": "Cultural experiences",
-                "examples": [
-                    "museums",
-                    "galleries",
-                    "historic sites"
-                ]
-            }
-        ]
-    }
+    "conversation_state_agent1qddkgq6ugvjkpx5zu5e40g0js88hqpcsj5trh56gqxtjvnrq6xanqzgan6w": null
 }

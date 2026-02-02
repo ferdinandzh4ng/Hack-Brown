@@ -19,14 +19,6 @@ import re
 from dotenv import load_dotenv
 from langgraph.graph import StateGraph, END
 
-# Import Gemini fallback
-try:
-    from gemini_fallback import generate_schedule_with_gemini
-    GEMINI_FALLBACK_AVAILABLE = True
-except ImportError:
-    GEMINI_FALLBACK_AVAILABLE = False
-    print("Warning: Gemini fallback not available. Install google-generativeai for fallback support.")
-
 load_dotenv()
 
 # ============================================================
@@ -58,6 +50,7 @@ class OrchestratorState(TypedDict):
     timeframe: str
     start_time: Optional[str]  # ISO 8601 datetime string
     end_time: Optional[str]  # ISO 8601 datetime string
+    user_id: Optional[str]  # User ID for preference-based planning
     fund_allocation_response: Optional[Dict]
     events_scraper_response: Optional[Dict]
     budget_filter_response: Optional[Dict]
@@ -184,12 +177,13 @@ async def call_intent_dispatcher_agent(
     conversation_state: Optional[Dict],
     location: Optional[str] = None,
     start_time: Optional[str] = None,
-    end_time: Optional[str] = None
+    end_time: Optional[str] = None,
+    user_id: Optional[str] = None
 ) -> Dict:
     """Call intent dispatcher agent via Fetch.ai using send_and_receive"""
     try:
-        # If we have location, start_time, end_time, or budget, send them as JSON to agents.py
-        if location or start_time or end_time:
+        # If we have location, start_time, end_time, user_id, or budget, send them as JSON to agents.py
+        if location or start_time or end_time or user_id:
             message_data = {
                 "user_request": user_input
             }
@@ -199,9 +193,11 @@ async def call_intent_dispatcher_agent(
                 message_data["start_time"] = start_time
             if end_time:
                 message_data["end_time"] = end_time
+            if user_id:
+                message_data["user_id"] = user_id
             
             message_text = json.dumps(message_data)
-            ctx.logger.info(f"Sending JSON to intent dispatcher with location={location}, start_time={start_time}, end_time={end_time}")
+            ctx.logger.info(f"Sending JSON to intent dispatcher with location={location}, start_time={start_time}, end_time={end_time}, user_id={user_id}")
         else:
             # No JSON values, send plain text
             message_text = user_input
@@ -324,11 +320,12 @@ async def dispatch_intent_node(state: OrchestratorState, ctx: Context) -> Orches
         location = state.get("location")
         start_time = state.get("start_time")
         end_time = state.get("end_time")
+        user_id = state.get("user_id")
         
-        # Call intent dispatcher agent via Fetch.ai with location and times
+        # Call intent dispatcher agent via Fetch.ai with location, times, and user_id
         result = await call_intent_dispatcher_agent(
             ctx, user_input, sender, conversation_state, 
-            location=location, start_time=start_time, end_time=end_time
+            location=location, start_time=start_time, end_time=end_time, user_id=user_id
         )
         
         state["dispatch_result"] = result
@@ -743,7 +740,7 @@ async def parallel_agent_calls_node(state: OrchestratorState, ctx: Context) -> O
         return state
 
 async def call_budget_filter_node(state: OrchestratorState, ctx: Context) -> OrchestratorState:
-    """Node 4: Call budget filter agent with both agent outputs, or use Gemini fallback if agents failed"""
+    """Node 4: Call budget filter agent with both agent outputs"""
     try:
         ctx.logger.info(f"[Budget Filter] Starting budget filter node...")
         fund_allocation = state.get("fund_allocation_response", {})
@@ -753,46 +750,15 @@ async def call_budget_filter_node(state: OrchestratorState, ctx: Context) -> Orc
         ctx.logger.info(f"[Budget Filter] Fund allocation type: {type(fund_allocation)}, has error: {fund_allocation.get('error') if isinstance(fund_allocation, dict) else 'N/A'}")
         ctx.logger.info(f"[Budget Filter] Events scraper type: {type(events_scraper)}, has error: {events_scraper.get('error') if isinstance(events_scraper, dict) else 'N/A'}")
         
-        # Check for errors - if both agents failed, try Gemini fallback immediately
+        # Check for errors - if both agents failed, return error
         if fund_allocation.get("error") and events_scraper.get("error"):
-            ctx.logger.warning("Both agents returned errors, attempting Gemini fallback...")
-            
-            if GEMINI_FALLBACK_AVAILABLE:
-                try:
-                    location = state.get("location", "")
-                    budget = state.get("budget", 0)
-                    start_time = state.get("start_time")
-                    end_time = state.get("end_time")
-                    
-                    if location and budget > 0 and activities:
-                        ctx.logger.info(f"[Budget Filter] Using Gemini fallback: location={location}, budget={budget}, activities={activities}")
-                        gemini_result = generate_schedule_with_gemini(
-                            location=location,
-                            budget=budget,
-                            interest_activities=activities,
-                            start_time=start_time,
-                            end_time=end_time
-                        )
-                        
-                        if gemini_result and not gemini_result.get("error"):
-                            ctx.logger.info(f"[Budget Filter] ✓ Gemini fallback succeeded")
-                            state["budget_filter_response"] = gemini_result
-                            return state
-                        else:
-                            ctx.logger.warning(f"[Budget Filter] Gemini fallback also failed: {gemini_result.get('error') if gemini_result else 'No response'}")
-                    else:
-                        ctx.logger.warning(f"[Budget Filter] Cannot use Gemini fallback: missing data")
-                except Exception as gemini_err:
-                    ctx.logger.error(f"[Budget Filter] Exception in Gemini fallback: {gemini_err}")
-            
-            # If fallback failed or not available, set error with actual agent details
+            ctx.logger.warning("Both agents returned errors")
             fund_err = fund_allocation.get("error", "Unknown")
             events_err = events_scraper.get("error", "Unknown")
             state["budget_filter_response"] = {
                 "error": (
                     f"Fund allocation and events scraper both failed. "
-                    f"Fund allocation: {fund_err}. Events scraper: {events_err}. "
-                    "Gemini fallback unavailable or also failed."
+                    f"Fund allocation: {fund_err}. Events scraper: {events_err}."
                 )
             }
             return state
@@ -829,7 +795,7 @@ async def call_budget_filter_node(state: OrchestratorState, ctx: Context) -> Orc
         return state
 
 def combine_outputs_node(state: OrchestratorState) -> OrchestratorState:
-    """Node 5: Return budget filter output as final result, with Gemini fallback"""
+    """Node 5: Return budget filter output as final result"""
     # Note: This node doesn't have ctx, so we use print for logging
     try:
         print(f"[Combine Outputs] === Starting combine outputs node ===")
@@ -840,75 +806,21 @@ def combine_outputs_node(state: OrchestratorState) -> OrchestratorState:
         print(f"[Combine Outputs] Budget filter response keys: {list(budget_filter.keys()) if isinstance(budget_filter, dict) else 'not a dict'}")
         print(f"[Combine Outputs] Budget filter has error: {budget_filter.get('error') if isinstance(budget_filter, dict) else 'N/A'}")
         
-        # Use filtered output if available, otherwise try Gemini fallback
+        # Use filtered output if available
         if budget_filter and not budget_filter.get("error"):
             # Return just the budget filter output - it contains everything needed
             state["final_output"] = budget_filter
             print(f"[Combine Outputs] ✓ Set final_output from budget_filter: {len(str(budget_filter))} chars")
         else:
-            # If filter failed, try Gemini fallback
+            # If filter failed, return error
             error_msg = budget_filter.get("error", "Budget filter not executed") if isinstance(budget_filter, dict) else "Budget filter response is invalid"
             print(f"[Combine Outputs] Budget filter failed: {error_msg}")
-            print(f"[Combine Outputs] Attempting Gemini AI fallback...")
-            
-            # Try Gemini fallback
-            if GEMINI_FALLBACK_AVAILABLE:
-                try:
-                    location = state.get("location", "")
-                    budget = state.get("budget", 0)
-                    activities = state.get("activities", [])
-                    start_time = state.get("start_time")
-                    end_time = state.get("end_time")
-                    
-                    if location and budget > 0 and activities:
-                        print(f"[Combine Outputs] Calling Gemini fallback with location={location}, budget={budget}, activities={activities}")
-                        gemini_result = generate_schedule_with_gemini(
-                            location=location,
-                            budget=budget,
-                            interest_activities=activities,
-                            start_time=start_time,
-                            end_time=end_time
-                        )
-                        
-                        if gemini_result and not gemini_result.get("error"):
-                            state["final_output"] = gemini_result
-                            print(f"[Combine Outputs] ✓ Set final_output from Gemini fallback: {len(str(gemini_result))} chars")
-                        else:
-                            gemini_error = gemini_result.get("error", "Unknown Gemini error") if gemini_result else "No response from Gemini"
-                            print(f"[Combine Outputs] ✗ Gemini fallback failed: {gemini_error}")
-                            state["final_output"] = {
-                                "type": "error",
-                                "message": f"Both budget filter and Gemini fallback failed. Budget filter: {error_msg}. Gemini: {gemini_error}",
-                                "location": location,
-                                "budget": budget
-                            }
-                    else:
-                        print(f"[Combine Outputs] ✗ Cannot use Gemini fallback: missing required data (location={location}, budget={budget}, activities={activities})")
-                        state["final_output"] = {
-                            "type": "error",
-                            "message": error_msg,
-                            "location": state.get("location", ""),
-                            "budget": state.get("budget", 0)
-                        }
-                except Exception as gemini_err:
-                    print(f"[Combine Outputs] ✗ Exception in Gemini fallback: {gemini_err}")
-                    import traceback
-                    print(traceback.format_exc())
-                    state["final_output"] = {
-                        "type": "error",
-                        "message": f"Budget filter failed and Gemini fallback error: {str(gemini_err)}",
-                        "location": state.get("location", ""),
-                        "budget": state.get("budget", 0)
-                    }
-            else:
-                # No fallback available
-                print(f"[Combine Outputs] ✗ No Gemini fallback available")
-                state["final_output"] = {
-                    "type": "error",
-                    "message": error_msg,
-                    "location": state.get("location", ""),
-                    "budget": state.get("budget", 0)
-                }
+            state["final_output"] = {
+                "type": "error",
+                "message": error_msg,
+                "location": state.get("location", ""),
+                "budget": state.get("budget", 0)
+            }
         
         print(f"[Combine Outputs] === Combine outputs node completed ===")
         return state
@@ -1207,6 +1119,7 @@ async def handle_user_message(ctx: Context, sender: str, msg: ChatMessage):
         location_from_json = None
         start_time_from_json = None
         end_time_from_json = None
+        user_id_from_json = None
         
         if parsed_json:
             # Check if it's an error response - ignore stale error messages
@@ -1228,13 +1141,14 @@ async def handle_user_message(ctx: Context, sender: str, msg: ChatMessage):
                 await ctx.send(sender, error_msg)
                 return
             
-            # Check if it's the new JSON format with start_time, end_time, location, user_request, budget
+            # Check if it's the new JSON format with start_time, end_time, location, user_request, budget, user_id
             if "user_request" in parsed_json and "location" in parsed_json:
                 user_request_text = parsed_json.get("user_request", "")
                 location_from_json = parsed_json.get("location", "")
                 start_time_from_json = parsed_json.get("start_time")
                 end_time_from_json = parsed_json.get("end_time")
                 budget_from_json = parsed_json.get("budget")
+                user_id_from_json = parsed_json.get("user_id")
                 
                 # Validate location is not an error message
                 invalid_location_patterns = [
@@ -1336,6 +1250,7 @@ async def handle_user_message(ctx: Context, sender: str, msg: ChatMessage):
             "timeframe": "",
             "start_time": start_time_from_json,  # Use start_time from JSON or conversation_state
             "end_time": end_time_from_json,  # Use end_time from JSON or conversation_state
+            "user_id": user_id_from_json,  # Use user_id from JSON
             "fund_allocation_response": None,
             "events_scraper_response": None,
             "budget_filter_response": None,

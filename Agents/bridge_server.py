@@ -14,10 +14,11 @@ from uuid import uuid4
 from typing import Optional, Tuple, List
 from dotenv import load_dotenv
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Header
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import uvicorn
+from Login import LoginManager
 
 from uagents import Agent, Context, Protocol
 from uagents_core.contrib.protocols.chat import (
@@ -26,15 +27,6 @@ from uagents_core.contrib.protocols.chat import (
     ChatAcknowledgement,
     chat_protocol_spec,
 )
-
-# Import Gemini fallback - COMMENTED OUT
-# try:
-#     from gemini_fallback import generate_schedule_with_gemini
-#     GEMINI_FALLBACK_AVAILABLE = True
-# except ImportError:
-#     GEMINI_FALLBACK_AVAILABLE = False
-#     print("Warning: Gemini fallback not available. Install google-generativeai for fallback support.")
-GEMINI_FALLBACK_AVAILABLE = False
 
 load_dotenv()
 
@@ -80,7 +72,6 @@ class BridgeState:
         
         self.last_request_time = None
         self.pending_request_id = None
-        print("Bridge state reset - queues cleared")
 
 # Global state instance
 bridge_state = BridgeState()
@@ -229,6 +220,9 @@ bridge_agent.include(chat_proto, publish_manifest=False)
 # FastAPI app
 app = FastAPI(title="Orchestrator Bridge Server")
 
+# Initialize LoginManager for MongoDB operations
+login_manager = LoginManager()
+
 # CORS middleware
 app.add_middleware(
     CORSMiddleware,
@@ -261,6 +255,20 @@ class BookingResponse(BaseModel):
     data: Optional[dict] = None
     error: Optional[str] = None
 
+class SaveTripRequest(BaseModel):
+    location: str
+    start_time: str
+    end_time: str
+    budget: Optional[float] = None
+    user_request: str
+    activities: List[dict] = []
+    itinerary: List[dict] = []
+
+class SaveTripResponse(BaseModel):
+    success: bool
+    trip_id: Optional[str] = None
+    message: str
+
 def extract_activities_and_budget(user_request: str) -> Tuple[list, float]:
     """Extract activities and budget from user request"""
     # Extract activities from user_request (simple keyword matching)
@@ -289,34 +297,6 @@ def extract_activities_and_budget(user_request: str) -> Tuple[list, float]:
     
     return activities, budget
 
-# COMMENTED OUT: Gemini fallback function
-# async def call_gemini_fallback(
-#     user_request: str,
-#     location: str,
-#     start_time: str,
-#     end_time: str,
-#     user_id: Optional[str] = None,
-#     budget: Optional[float] = None
-# ) -> dict:
-#     """Call Gemini fallback with extracted activities and budget"""
-#     return {
-#         "error": "Gemini fallback is disabled.",
-#         "fallback_attempted": False
-#     }
-async def call_gemini_fallback(
-    user_request: str,
-    location: str,
-    start_time: str,
-    end_time: str,
-    user_id: Optional[str] = None,
-    budget: Optional[float] = None
-) -> dict:
-    """Call Gemini fallback - DISABLED"""
-    return {
-        "error": "Gemini fallback is disabled.",
-        "fallback_attempted": False
-    }
-
 def generate_simple_fallback_schedule(
     location: str,
     budget: float,
@@ -325,7 +305,7 @@ def generate_simple_fallback_schedule(
     end_time: str
 ) -> dict:
     """
-    Generate a simple fallback schedule when Gemini API is unavailable.
+    Generate a simple fallback schedule when agents are unavailable.
     Creates a basic schedule structure without calling any external APIs.
     """
     from datetime import datetime, timedelta
@@ -419,10 +399,10 @@ def generate_simple_fallback_schedule(
             "remaining_budget": round(budget - total_cost, 2)
         },
         "fallback": True,
-        "fallback_reason": "Gemini API quota exceeded"
+        "fallback_reason": "Agents unavailable"
     }
 
-async def send_to_orchestrator(user_request: str, location: str, start_time: str, end_time: str, budget: Optional[float] = None) -> dict:
+async def send_to_orchestrator(user_request: str, location: str, start_time: str, end_time: str, budget: Optional[float] = None, user_id: Optional[str] = None) -> dict:
     """Send request to orchestrator and wait for response"""
     # Clear any stale messages from previous requests
     bridge_state.reset()
@@ -446,9 +426,7 @@ async def send_to_orchestrator(user_request: str, location: str, start_time: str
             try:
                 bridge_agent.run()
             except Exception as e:
-                print(f"Error running bridge agent: {e}")
-                import traceback
-                traceback.print_exc()
+                pass
             finally:
                 bridge_state.agent_running = False
         
@@ -466,6 +444,8 @@ async def send_to_orchestrator(user_request: str, location: str, start_time: str
     }
     if budget is not None:
         request_data["budget"] = budget
+    if user_id is not None:
+        request_data["user_id"] = user_id
     
     # Create ChatMessage
     message = ChatMessage(
@@ -487,104 +467,34 @@ async def send_to_orchestrator(user_request: str, location: str, start_time: str
         
         # Queue the message to be sent by the agent
         # The interval handler will pick it up and send it
-        print(f"Queueing message to send to orchestrator: {ORCHESTRATOR_AGENT_ADDRESS}")
-        print(f"Message ID: {message.msg_id}")
-        print(f"Queue size before put: {bridge_state.send_queue.qsize()}")
         await bridge_state.send_queue.put((ORCHESTRATOR_AGENT_ADDRESS, message))
-        print(f"✓ Message queued. Queue size after put: {bridge_state.send_queue.qsize()}")
         
         # Wait a bit for the interval handler to process and send
-        print(f"Waiting 1 second for interval handler to process message...")
         await asyncio.sleep(1)
-        print(f"Queue size after wait: {bridge_state.send_queue.qsize()}")
         
         # Wait for response (with timeout)
         # Clear any stale responses first
-        cleared_count = 0
         while not bridge_state.response_queue.empty():
             try:
                 bridge_state.response_queue.get_nowait()
-                cleared_count += 1
             except asyncio.QueueEmpty:
                 break
         
-        if cleared_count > 0:
-            print(f"Cleared {cleared_count} stale response(s) from queue")
+        # Wait indefinitely for response (no timeout)
+        response_text = await bridge_state.response_queue.get()
         
-        print(f"Waiting for response from orchestrator (timeout: 30s)...")
-        print(f"Queue size before wait: {bridge_state.response_queue.qsize()}")
+        # Clear request tracking after getting response
+        bridge_state.last_request_time = None
+        bridge_state.pending_request_id = None
         
-        try:
-            response_text = await asyncio.wait_for(bridge_state.response_queue.get(), timeout=30.0)
-            
-            print(f"✓ Received response from queue: {len(response_text)} chars")
-            print(f"Response preview: {response_text[:200]}...")
-            
-            # Clear request tracking after getting response
-            bridge_state.last_request_time = None
-            bridge_state.pending_request_id = None
-            
-            if response_text:
-                try:
-                    response_data = json.loads(response_text)
-                    print(f"✓ Successfully parsed JSON response")
-                    
-                    # Check if orchestrator returned error or clarification_needed - use Gemini fallback
-                    response_type = response_data.get("type")
-                    if response_type == "clarification_needed" or response_type == "error":
-                        error_type = "clarification_needed" if response_type == "clarification_needed" else "error"
-                        print(f"Orchestrator returned {error_type} - calling Gemini fallback...")
-                        if response_type == "error":
-                            print(f"Error message: {response_data.get('message', 'Unknown error')}")
-                        gemini_result = await call_gemini_fallback(
-                            user_request=user_request,
-                            location=location,
-                            start_time=start_time,
-                            end_time=end_time
-                        )
-                        if gemini_result and not gemini_result.get("error"):
-                            print(f"✓ Gemini fallback succeeded after {error_type}")
-                            return gemini_result
-                        else:
-                            # If Gemini fallback also fails, return the original error
-                            print(f"✗ Gemini fallback failed, returning original {error_type} response")
-                            return response_data
-                    
-                    print(f"Returning response to frontend")
-                    return response_data
-                except json.JSONDecodeError as e:
-                    print(f"✗ JSON parse error: {e}")
-                    print(f"Response text (first 500 chars): {response_text[:500]}")
-                    return {"error": f"Invalid JSON response: {response_text[:200]}"}
-            else:
-                print("✗ Empty response text")
-                return {"error": "No text content in response"}
-        except asyncio.TimeoutError:
-            print(f"✗ Timeout waiting for response (30s elapsed)")
-            print(f"Queue size at timeout: {bridge_state.response_queue.qsize()}")
-            # Clear request tracking on timeout
-            bridge_state.last_request_time = None
-            bridge_state.pending_request_id = None
-            
-            # Call Gemini fallback after timeout
-            print(f"Orchestrator timeout - calling Gemini fallback...")
-            gemini_result = await call_gemini_fallback(
-                user_request=user_request,
-                location=location,
-                start_time=start_time,
-                end_time=end_time,
-                user_id=None,  # user_id not available in this context
-                budget=None  # budget not available in this context
-            )
-            if gemini_result and not gemini_result.get("error"):
-                return gemini_result
-            else:
-                # If Gemini fallback failed, return error
-                error_msg = gemini_result.get("error", "Unknown error") if gemini_result else "No response from Gemini"
-                return {
-                    "error": f"Orchestrator timeout and Gemini fallback failed: {error_msg}",
-                    "fallback_attempted": True
-                }
+        if response_text:
+            try:
+                response_data = json.loads(response_text)
+                return response_data
+            except json.JSONDecodeError as e:
+                return {"error": f"Invalid JSON response: {response_text[:200]}"}
+        else:
+            return {"error": "No text content in response"}
                 
     except Exception as e:
         import traceback
@@ -595,7 +505,7 @@ async def send_to_orchestrator(user_request: str, location: str, start_time: str
         return {"error": f"Failed to send message: {str(e)}\n{error_trace}"}
 
 @app.post("/api/schedule", response_model=ScheduleResponse)
-async def create_schedule(request: ScheduleRequest):
+async def create_schedule(request: ScheduleRequest, authorization: Optional[str] = Header(None)):
     """Create a schedule by calling the orchestrator agent"""
     try:
         # Validate inputs
@@ -605,28 +515,23 @@ async def create_schedule(request: ScheduleRequest):
         if not request.start_time or not request.end_time:
             raise HTTPException(status_code=400, detail="start_time and end_time are required")
         
+        # Extract user_id from authorization token if available
+        user_id = request.user_id  # Use user_id from request if provided
+        if not user_id and authorization and authorization.startswith("Bearer "):
+            token = authorization.replace("Bearer ", "")
+            success, user_data = login_manager.verify_session(token)
+            if success and user_data:
+                user_id = user_data.get("user_id")
+        
         # Send request to orchestrator (agent will be started in send_to_orchestrator)
         response = await send_to_orchestrator(
             request.user_request,
             request.location,
             request.start_time,
             request.end_time,
-            request.budget
+            request.budget,
+            user_id
         )
-        
-        # If orchestrator fails and we have user_id, try gemini fallback with preferences
-        if "error" in response and request.user_id:
-            print(f"Orchestrator failed, trying Gemini fallback with user preferences...")
-            gemini_result = await call_gemini_fallback(
-                user_request=request.user_request,
-                location=request.location,
-                start_time=request.start_time,
-                end_time=request.end_time,
-                user_id=request.user_id,
-                budget=request.budget
-            )
-            if gemini_result and not gemini_result.get("error"):
-                return ScheduleResponse(success=True, data=gemini_result)
         
         if "error" in response:
             return ScheduleResponse(success=False, error=response["error"])
@@ -635,6 +540,45 @@ async def create_schedule(request: ScheduleRequest):
         
     except Exception as e:
         return ScheduleResponse(success=False, error=str(e))
+
+@app.post("/api/save-trip", response_model=SaveTripResponse)
+async def save_trip(request: SaveTripRequest, authorization: Optional[str] = Header(None)):
+    """Save a trip/itinerary to MongoDB"""
+    try:
+        # Get user_id from authorization token
+        user_id = None
+        if authorization and authorization.startswith("Bearer "):
+            token = authorization.replace("Bearer ", "")
+            success, user_data = login_manager.verify_session(token)
+            if success and user_data:
+                user_id = user_data.get("user_id")
+        
+        if not user_id:
+            raise HTTPException(status_code=401, detail="Authentication required")
+        
+        # Save trip to MongoDB
+        success, message, trip_id = login_manager.save_trip(
+            user_id=user_id,
+            trip_data={
+                "location": request.location,
+                "start_time": request.start_time,
+                "end_time": request.end_time,
+                "budget": request.budget,
+                "user_request": request.user_request,
+                "activities": request.activities,
+                "itinerary": request.itinerary
+            }
+        )
+        
+        if success:
+            return SaveTripResponse(success=True, trip_id=trip_id, message=message)
+        else:
+            raise HTTPException(status_code=500, detail=message)
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        return SaveTripResponse(success=False, message=f"Failed to save trip: {str(e)}")
 
 @app.get("/health")
 async def health_check():
@@ -650,7 +594,6 @@ async def send_to_booking_agent(items: List[dict], location: str, user_id: Optio
         # Try using aiohttp first (async)
         try:
             import aiohttp
-            print(f"Sending booking request to {booking_url}")
             
             async with aiohttp.ClientSession() as session:
                 payload = {"items": items, "location": location}
@@ -666,7 +609,6 @@ async def send_to_booking_agent(items: List[dict], location: str, user_id: Optio
                         return {"error": f"Booking agent HTTP error {response.status}: {error_text}"}
                     
                     result = await response.json()
-                    print(f"✓ Received booking response from HTTP endpoint")
                     
                     if not result.get("success", False):
                         return {"error": result.get("error", "Unknown error from booking agent")}
@@ -675,7 +617,7 @@ async def send_to_booking_agent(items: List[dict], location: str, user_id: Optio
         except ImportError:
             # Fallback to requests library (sync, run in thread pool)
             import requests
-            print(f"Sending booking request to {booking_url} (using requests)")
+            from requests.exceptions import RequestException
             
             def make_request():
                 payload = {"items": items, "location": location}
@@ -694,7 +636,6 @@ async def send_to_booking_agent(items: List[dict], location: str, user_id: Optio
                 return {"error": f"Booking agent HTTP error {response.status_code}: {response.text}"}
             
             result = response.json()
-            print(f"✓ Received booking response from HTTP endpoint")
             
             if not result.get("success", False):
                 return {"error": result.get("error", "Unknown error from booking agent")}
@@ -702,10 +643,13 @@ async def send_to_booking_agent(items: List[dict], location: str, user_id: Optio
             return result.get("data", {})
                 
     except Exception as e:
-        import traceback
-        error_trace = traceback.format_exc()
-        print(f"✗ Error calling booking agent: {error_trace}")
-        return {"error": f"Failed to call booking agent: {str(e)}"}
+        error_msg = str(e) if str(e) else "Unknown error"
+        error_type = type(e).__name__
+        # Check if it's a connection error
+        error_lower = error_msg.lower()
+        if any(keyword in error_lower for keyword in ["connection", "refused", "timeout", "unreachable", "cannot connect", "name or service not known"]):
+            return {"error": f"Failed to connect to booking agent at {booking_url}: {error_msg}. Make sure the booking agent is running on port 8007."}
+        return {"error": f"Failed to call booking agent ({error_type}): {error_msg if error_msg else 'No error message available'}"}
 
 @app.post("/api/booking", response_model=BookingResponse)
 async def create_booking(request: BookingRequest):
@@ -743,7 +687,6 @@ async def reset_state():
 
 def cleanup_on_exit():
     """Cleanup function called on exit"""
-    print("Cleaning up bridge server...")
     bridge_state.reset()
     if bridge_state.agent_running:
         bridge_state.agent_running = False
@@ -751,7 +694,6 @@ def cleanup_on_exit():
 # Register cleanup handlers
 def signal_handler(sig, frame):
     """Handle shutdown signals"""
-    print("\nShutdown signal received, cleaning up...")
     cleanup_on_exit()
     sys.exit(0)
 
@@ -760,7 +702,6 @@ signal.signal(signal.SIGTERM, signal_handler)
 
 if __name__ == "__main__":
     # Clear any stale state on startup
-    print("Starting bridge server - clearing stale state...")
     bridge_state.reset()
     
     # Run FastAPI server

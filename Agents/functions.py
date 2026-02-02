@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from dotenv import load_dotenv
 from pymongo import MongoClient
 from openai import OpenAI
+import certifi
 
 load_dotenv()
 
@@ -76,11 +77,19 @@ def get_mongodb_client():
             cluster_lower = mongodb_cluster.lower().replace(" ", "-")
             cluster_host = f"{cluster_lower}.mongodb.net"
         
-        connection_string = f"mongodb+srv://{mongodb_username}:{mongodb_password}@{cluster_host}/{mongodb_database}?retryWrites=true&w=majority"
+        # For Python 3.12 compatibility, add TLS parameters to connection string
+        connection_string = f"mongodb+srv://{mongodb_username}:{mongodb_password}@{cluster_host}/{mongodb_database}?retryWrites=true&w=majority&tls=true"
         db_part = mongodb_database
     
     try:
-        client_mongo = MongoClient(connection_string, serverSelectionTimeoutMS=10000)
+        # For Python 3.12 SSL compatibility - use certifi CA bundle
+        client_mongo = MongoClient(
+            connection_string, 
+            serverSelectionTimeoutMS=10000,
+            connectTimeoutMS=20000,
+            socketTimeoutMS=20000,
+            tlsCAFile=certifi.where()
+        )
         client_mongo.admin.command('ping')
         print(f"Successfully connected to MongoDB: {db_part}")
         return client_mongo, db_part
@@ -792,7 +801,7 @@ def finalize_activity_list(original_request: str, user_preferences: str, locatio
         print(traceback.format_exc())
         return None
 
-def dispatch_intent(user_request: str, sender: str, conversation_state: Optional[Dict] = None, json_start_time: Optional[str] = None, json_end_time: Optional[str] = None) -> Dict:
+def dispatch_intent(user_request: str, sender: str, conversation_state: Optional[Dict] = None, json_start_time: Optional[str] = None, json_end_time: Optional[str] = None, user_id: Optional[str] = None) -> Dict:
     """
     Main intent dispatch function that processes user requests.
     
@@ -1047,13 +1056,55 @@ Examples:
                             }
                         }
                 else:
-                    # INSUFFICIENT TRANSACTION DATA: Research location and prompt user for preferences
-                    # STEP 2d: Research popular activity categories for the location
+                    # INSUFFICIENT TRANSACTION DATA: Check user preferences from database
+                    # STEP 2d: Try to get user preferences from Login database
+                    user_preferences_from_db = None
+                    if user_id:
+                        try:
+                            from Login import LoginManager
+                            login_manager = LoginManager()
+                            user_profile = login_manager.get_user_profile(user_id)
+                            
+                            if user_profile and user_profile.get("preferences"):
+                                preferences = user_profile.get("preferences", {})
+                                activity_categories = preferences.get("activity_categories", [])
+                                
+                                if activity_categories:
+                                    user_preferences_from_db = ", ".join(activity_categories)
+                                    print(f"Found user preferences from database: {activity_categories}")
+                        except Exception as e:
+                            print(f"Error fetching user preferences from database: {e}")
+                            import traceback
+                            traceback.print_exc()
+                    else:
+                        print("Skipping user preferences lookup: no user_id provided")
+                    
+                    # STEP 2e: If we have user preferences from database, use them directly
+                    if user_preferences_from_db:
+                        print(f"Using user preferences from database: {user_preferences_from_db}")
+                        dispatch_plan = finalize_activity_list(
+                            original_request=user_request,
+                            user_preferences=user_preferences_from_db,
+                            location=location,
+                            budget=str(basic_info.get("budget", "null")),
+                            start_time=basic_info.get("start_time", "null") or "null",
+                            end_time=basic_info.get("end_time", "null") or "null",
+                            transaction_data=None
+                        )
+                        
+                        if dispatch_plan:
+                            # Return dispatch plan with GENERAL categories from user preferences
+                            return {"type": "dispatch_plan", "data": dispatch_plan}
+                        else:
+                            print("Failed to create dispatch plan from user preferences, falling back to clarification")
+                    
+                    # STEP 2f: If no user preferences in database, research location and prompt user for preferences
+                    # Research popular activity categories for the location
                     research_result = research_location_activities(location)
                     categories = research_result.get("general_categories", [])
                     
                     if categories:
-                        # STEP 2e: Generate user-friendly prompt asking them to select categories
+                        # STEP 2g: Generate user-friendly prompt asking them to select categories
                         # Returns clarification_needed which will prompt user to select from:
                         # 1. EAT: Dining and food experiences
                         # 2. SHOP: Shopping and markets
